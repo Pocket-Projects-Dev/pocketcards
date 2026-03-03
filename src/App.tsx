@@ -1,6 +1,9 @@
 import { Routes, Route, Navigate } from "react-router-dom";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
+import Cards from "./pages/Cards";
+import NewCard from "./pages/NewCard";
+import AddSpend from "./pages/AddSpend";
 import AppShell from "./components/AppShell";
 import { useSession } from "./hooks/useSession";
 
@@ -12,9 +15,14 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={session ? <Navigate to="/" replace /> : <Login />} />
+
       <Route element={session ? <AppShell /> : <Navigate to="/login" replace />}>
         <Route path="/" element={<Dashboard />} />
+        <Route path="/cards" element={<Cards />} />
+        <Route path="/cards/new" element={<NewCard />} />
+        <Route path="/add" element={<AddSpend />} />
       </Route>
+
       <Route path="*" element={<Navigate to={session ? "/" : "/login"} replace />} />
     </Routes>
   );

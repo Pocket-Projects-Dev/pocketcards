@@ -26,6 +26,8 @@ export default function AppShell() {
       <nav className="fixed bottom-0 left-0 right-0 bg-black/80 backdrop-blur border-t border-white/10">
         <div className="mx-auto max-w-md flex">
           <NavItem to="/" label="Home" />
+          <NavItem to="/cards" label="Cards" />
+          <NavItem to="/add" label="Add" />
         </div>
       </nav>
     </div>
