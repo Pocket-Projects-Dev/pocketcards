@@ -3,7 +3,11 @@ import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import Cards from "./pages/Cards";
 import NewCard from "./pages/NewCard";
+import AddHub from "./pages/AddHub";
 import AddSpend from "./pages/AddSpend";
+import AddPayment from "./pages/AddPayment";
+import AddIncome from "./pages/AddIncome";
+import NewEmi from "./pages/NewEmi";
 import AppShell from "./components/AppShell";
 import { useSession } from "./hooks/useSession";
 
@@ -20,7 +24,12 @@ export default function App() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/cards" element={<Cards />} />
         <Route path="/cards/new" element={<NewCard />} />
-        <Route path="/add" element={<AddSpend />} />
+
+        <Route path="/add" element={<AddHub />} />
+        <Route path="/add/spend" element={<AddSpend />} />
+        <Route path="/add/payment" element={<AddPayment />} />
+        <Route path="/add/income" element={<AddIncome />} />
+        <Route path="/add/emi" element={<NewEmi />} />
       </Route>
 
       <Route path="*" element={<Navigate to={session ? "/" : "/login"} replace />} />
