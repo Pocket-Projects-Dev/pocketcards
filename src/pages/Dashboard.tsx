@@ -3,6 +3,8 @@ import { supabase } from "../lib/supabase";
 import { addDaysISO, formatDateShort, formatINR, todayISO } from "../lib/format";
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
+const [err, setErr] = useState<string | null>(null);
+
 type CycleRow = {
   card_id: string;
   card_name: string;
@@ -31,15 +33,35 @@ export default function Dashboard() {
     await supabase.auth.signOut();
   };
 
-  useEffect(() => {
-    (async () => {
-      setLoading(true);
+  {err ? (
+  <div className="mt-3 rounded-2xl bg-white/5 p-3 text-sm text-red-300">
+    {err}
+  </div>
+) : null}
 
-      const { data: dueData } = await supabase
-        .from("card_cycle_summary")
-        .select("card_id,card_name,issuer,last4,due_date,days_to_due,cycle_spend,emi_due,total_due,paid_to_date,remaining_due,per_day_to_due")
-        .order("due_date", { ascending: true });
+useEffect(() => {
+  let alive = true;
 
+  (async () => {
+    setLoading(true);
+    setErr(null);
+
+    const { data: dueData, error: dueErr } = await supabase
+      .from("card_cycle_summary")
+      .select("card_id,card_name,issuer,last4,due_date,days_to_due,cycle_spend,emi_due,total_due,paid_to_date,remaining_due,per_day_to_due")
+      .order("due_date", { ascending: true });
+
+    console.log("card_cycle_summary", { dueErr, dueData });
+
+    if (dueErr) {
+      if (alive) {
+        setErr(`card_cycle_summary: ${dueErr.message}`);
+        setLoading(false);
+      }
+      return;
+    }
+
+    if (alive) {
       setRows(((dueData as any[]) ?? []).map((x) => ({
         ...x,
         cycle_spend: Number(x.cycle_spend || 0),
@@ -49,32 +71,64 @@ export default function Dashboard() {
         remaining_due: Number(x.remaining_due || 0),
         per_day_to_due: Number(x.per_day_to_due || 0),
       })) as CycleRow[]);
+    }
 
-      const { data: monthlyData } = await supabase
-        .from("monthly_spend")
-        .select("month,spend")
-        .order("month", { ascending: false })
-        .limit(6);
+    const { data: monthlyData, error: monthlyErr } = await supabase
+      .from("monthly_spend")
+      .select("month,spend")
+      .order("month", { ascending: false })
+      .limit(6);
 
-      const monthlyNorm = ((monthlyData as any[]) ?? [])
-        .map((m) => ({ month: String(m.month).slice(0, 7), spend: Number(m.spend || 0) }))
-        .reverse();
-      setMonthly(monthlyNorm);
+    console.log("monthly_spend", { monthlyErr, monthlyData });
 
-      const from = todayISO();
-      const to = addDaysISO(30);
-      const { data: incData } = await supabase
-        .from("income_events")
-        .select("amount")
-        .gte("received_on", from)
-        .lte("received_on", to);
+    if (monthlyErr) {
+      if (alive) {
+        setErr(`monthly_spend: ${monthlyErr.message}`);
+        setLoading(false);
+      }
+      return;
+    }
 
-      const incTotal = ((incData as IncomeRow[]) ?? []).reduce((s, x) => s + Number(x.amount || 0), 0);
+    const monthlyNorm = ((monthlyData as any[]) ?? [])
+      .map((m) => ({ month: String(m.month).slice(0, 7), spend: Number(m.spend || 0) }))
+      .reverse();
+
+    if (alive) setMonthly(monthlyNorm);
+
+    const from = todayISO();
+    const to = addDaysISO(30);
+
+    const { data: incData, error: incErr } = await supabase
+      .from("income_events")
+      .select("amount")
+      .gte("received_on", from)
+      .lte("received_on", to);
+
+    console.log("income_events next30d", { incErr, from, to, incData });
+
+    if (incErr) {
+      if (alive) {
+        setErr(`income_events: ${incErr.message}`);
+        setLoading(false);
+      }
+      return;
+    }
+
+    const incTotal = ((incData as IncomeRow[]) ?? []).reduce(
+      (s, x) => s + Number(x.amount || 0),
+      0
+    );
+
+    if (alive) {
       setIncome30(incTotal);
-
       setLoading(false);
-    })();
-  }, []);
+    }
+  })();
+
+  return () => {
+    alive = false;
+  };
+}, []);
 
   const totalDue = useMemo(
     () => rows.reduce((s, r) => s + Number(r.remaining_due || 0), 0),
