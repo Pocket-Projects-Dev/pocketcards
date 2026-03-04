@@ -4,6 +4,9 @@ import { addDaysISO, formatDateShort, formatINR, todayISO } from "../lib/format"
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Link } from "react-router-dom";
 import { Button, Card, ProgressBar } from "../components/ui";
+import { buildDuesByDate, buildMilestones, type IncomeItem } from "../lib/payplan";
+import { computeFundBalance, sumTodayNet, type FundEvent } from "../lib/fund";
+import { useSession } from "../hooks/useSession";
 
 type CycleRow = {
   card_id: string;
@@ -28,11 +31,16 @@ function isMissingColumn(err: any, field: string) {
 }
 
 export default function Dashboard() {
+  const { session } = useSession();
+  const userId = session?.user?.id ?? null;
+
   const [rows, setRows] = useState<CycleRow[]>([]);
   const [monthly, setMonthly] = useState<MonthlyRow[]>([]);
   const [income30, setIncome30] = useState<number>(0);
+  const [fundEvents, setFundEvents] = useState<FundEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const signOut = async () => {
     await supabase.auth.signOut();
@@ -57,7 +65,7 @@ export default function Dashboard() {
         return;
       }
 
-      setRows(((dueData as any[]) ?? []).map((x) => ({
+      setRows((((dueData as unknown) as any[]) ?? []).map((x) => ({
         ...x,
         cycle_spend: Number(x.cycle_spend || 0),
         emi_due: Number(x.emi_due || 0),
@@ -80,7 +88,7 @@ export default function Dashboard() {
         return;
       }
 
-      const monthlyNorm = ((monthlyData as any[]) ?? [])
+      const monthlyNorm = (((monthlyData as unknown) as any[]) ?? [])
         .map((m) => ({ month: String(m.month).slice(0, 7), spend: Number(m.spend || 0) }))
         .reverse();
       setMonthly(monthlyNorm);
@@ -88,32 +96,48 @@ export default function Dashboard() {
       const from = todayISO();
       const to = addDaysISO(30);
 
-const candidates = ["received_on", "event_date", "received_at", "date"];
-let incomeTotal = 0;
+      const candidates = ["received_on", "event_date", "received_at", "date"];
+      let incomeTotal = 0;
 
-for (const field of candidates) {
-  const { data, error } = await supabase
-    .from("income_events")
-    .select("amount")
-    .gte(field, from)
-    .lte(field, to);
+      for (const field of candidates) {
+        const { data, error } = await supabase
+          .from("income_events")
+          .select("amount")
+          .gte(field, from)
+          .lte(field, to);
 
-  if (!alive) return;
+        if (!alive) return;
 
-  if (!error) {
-    const rows = ((data as unknown) as Array<{ amount: any }>) ?? [];
-    incomeTotal = rows.reduce((s, r) => s + Number(r.amount || 0), 0);
-    break;
-  }
+        if (!error) {
+          const r = (((data as unknown) as Array<{ amount: any }>) ?? []);
+          incomeTotal = r.reduce((s, row) => s + Number(row.amount || 0), 0);
+          break;
+        }
 
-  if (!isMissingColumn(error, field)) {
-    setErr(`income_events: ${error.message}`);
-    setLoading(false);
-    return;
-  }
-}
+        if (!isMissingColumn(error, field)) {
+          setErr(`income_events: ${error.message}`);
+          setLoading(false);
+          return;
+        }
+      }
 
       setIncome30(incomeTotal);
+
+      const { data: fe, error: feErr } = await supabase
+        .from("plan_fund_events")
+        .select("id,event_date,event_type,amount,note,created_at")
+        .order("event_date", { ascending: false })
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      if (!alive) return;
+      if (feErr) {
+        setErr(`plan_fund_events: ${feErr.message}`);
+        setLoading(false);
+        return;
+      }
+
+      setFundEvents((((fe as unknown) as any[]) ?? []) as FundEvent[]);
       setLoading(false);
     })();
 
@@ -122,8 +146,72 @@ for (const field of candidates) {
     };
   }, []);
 
+  const fundBalance = useMemo(() => computeFundBalance(fundEvents), [fundEvents]);
+  const todayNet = useMemo(() => sumTodayNet(fundEvents, todayISO()), [fundEvents]);
+
   const totalDue = useMemo(() => rows.reduce((s, r) => s + Number(r.remaining_due || 0), 0), [rows]);
   const gap = useMemo(() => income30 - totalDue, [income30, totalDue]);
+
+  const dueItems = useMemo(
+    () => rows.filter((r) => Number(r.remaining_due || 0) > 0).map((r) => ({ due_date: r.due_date, amount: Number(r.remaining_due || 0) })),
+    [rows]
+  );
+
+  const { duesByDate, dueDates } = useMemo(() => buildDuesByDate(dueItems), [dueItems]);
+
+  const milestones = useMemo(
+    () =>
+      buildMilestones({
+        baseDate: todayISO(),
+        dueDates,
+        duesByDate,
+        incomes: [] as IncomeItem[],
+        startBuffer: fundBalance,
+      }),
+    [dueDates, duesByDate, fundBalance]
+  );
+
+  const todaySuggestion = useMemo(() => Math.ceil(milestones.reduce((m, x) => Math.max(m, Number(x.required_per_day || 0)), 0)), [milestones]);
+
+  const fundProgress = useMemo(() => {
+    if (totalDue <= 0) return 0;
+    return Math.max(0, Math.min(1, fundBalance / totalDue));
+  }, [fundBalance, totalDue]);
+
+  const setAsideToday = async () => {
+    if (!userId) {
+      setErr("Not signed in.");
+      return;
+    }
+    if (!(todaySuggestion > 0)) return;
+
+    setBusy(true);
+    setErr(null);
+
+    const payload = {
+      user_id: userId,
+      event_date: todayISO(),
+      event_type: "set_aside",
+      amount: Number(todaySuggestion),
+      note: "Daily set-aside",
+    };
+
+    const { data, error } = await supabase
+      .from("plan_fund_events")
+      .insert(payload)
+      .select("id,event_date,event_type,amount,note,created_at")
+      .single();
+
+    if (error) {
+      setErr(error.message);
+      setBusy(false);
+      return;
+    }
+
+    const row = (data as unknown) as FundEvent;
+    setFundEvents((prev) => [row, ...prev]);
+    setBusy(false);
+  };
 
   if (loading) return <div className="p-4 text-sm text-white/70">Loading…</div>;
 
@@ -132,7 +220,7 @@ for (const field of candidates) {
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="text-2xl font-semibold tracking-tight">Dashboard</div>
-          <div className="mt-1 text-sm text-white/60">Next dues, trend, and coverage</div>
+          <div className="mt-1 text-sm text-white/60">Daily action + upcoming dues</div>
         </div>
 
         <div className="flex items-center gap-2">
@@ -142,6 +230,30 @@ for (const field of candidates) {
       </div>
 
       {err ? <Card className="p-4 text-sm text-red-300">{err}</Card> : null}
+
+      <Card className="p-5 space-y-4">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <div className="text-sm text-white/60">Today’s set-aside</div>
+            <div className="mt-1 text-3xl font-semibold">{formatINR(todaySuggestion)}</div>
+            <div className="mt-2 text-xs text-white/60">Fund balance {formatINR(fundBalance)} • Today net {todayNet >= 0 ? "+" : "-"}{formatINR(Math.abs(todayNet))}</div>
+          </div>
+
+          <Button variant="primary" onClick={setAsideToday} disabled={busy || !(todaySuggestion > 0)}>
+            {busy ? "Saving…" : "Set aside"}
+          </Button>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between text-xs text-white/60">
+            <span>Fund coverage vs upcoming due</span>
+            <span>{formatINR(fundBalance)} / {formatINR(totalDue)}</span>
+          </div>
+          <div className="mt-2">
+            <ProgressBar value={fundProgress} />
+          </div>
+        </div>
+      </Card>
 
       <div className="grid grid-cols-2 gap-3">
         <Card className="p-5">
