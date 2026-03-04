@@ -1,18 +1,25 @@
 import { Link } from "react-router-dom";
+import { Card } from "../components/ui";
 
 function Tile(props: { to: string; title: string; subtitle: string }) {
   return (
-    <Link to={props.to} className="block rounded-2xl bg-white/5 p-4">
-      <div className="text-base font-medium">{props.title}</div>
-      <div className="mt-1 text-sm text-white/70">{props.subtitle}</div>
+    <Link to={props.to}>
+      <Card className="p-5 hover:bg-white/[0.06] transition">
+        <div className="text-base font-medium">{props.title}</div>
+        <div className="mt-1 text-sm text-white/60">{props.subtitle}</div>
+      </Card>
     </Link>
   );
 }
 
 export default function AddHub() {
   return (
-    <div className="p-4 space-y-3">
-      <h2 className="text-lg font-semibold">Add</h2>
+    <div className="p-4 text-white space-y-3">
+      <div>
+        <div className="text-2xl font-semibold tracking-tight">Add</div>
+        <div className="mt-1 text-sm text-white/60">Quick actions</div>
+      </div>
+
       <div className="space-y-3">
         <Tile to="/add/spend" title="Spend" subtitle="Add a transaction in this billing cycle" />
         <Tile to="/add/payment" title="Payment" subtitle="Log a card payment" />

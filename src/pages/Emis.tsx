@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 import { formatDateShort, formatINR } from "../lib/format";
+import { Button, Card, ProgressBar } from "../components/ui";
 
-type Card = { id: string; name: string; last4: string | null };
+type CardRow = { id: string; name: string; last4: string | null };
 
 type EmiPlan = {
   id: string;
   card_id: string;
   principal: number;
-  months: number;
+  months: number | null;
   monthly_emi: number;
   created_at: string;
 };
@@ -21,8 +22,13 @@ type EmiInstallment = {
   paid_at: string | null;
 };
 
+function isMissingColumn(err: any, field: string) {
+  const msg = String(err?.message || "").toLowerCase();
+  return msg.includes("does not exist") && msg.includes(field.toLowerCase());
+}
+
 export default function Emis() {
-  const [cards, setCards] = useState<Card[]>([]);
+  const [cards, setCards] = useState<CardRow[]>([]);
   const [plans, setPlans] = useState<EmiPlan[]>([]);
   const [installments, setInstallments] = useState<EmiInstallment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -36,31 +42,71 @@ export default function Emis() {
       setLoading(true);
       setErr(null);
 
-      const { data: c, error: ce } = await supabase.from("cards").select("id,name,last4");
+      const { data: c, error: ce } = await supabase
+        .from("cards")
+        .select("id,name,last4")
+        .order("created_at", { ascending: false });
+
       if (!alive) return;
       if (ce) {
         setErr(ce.message);
         setLoading(false);
         return;
       }
-      setCards(((c as any[]) ?? []) as Card[]);
+      setCards(((c as any[]) ?? []) as CardRow[]);
 
-      const { data: p, error: pe } = await supabase
-        .from("emi_plans")
-        .select("id,card_id,principal,months,monthly_emi,created_at")
-        .order("created_at", { ascending: false });
+      const monthFields = ["months", "tenure", "tenure_months"];
+      let usedMonthField: string | null = null;
+      let planData: any[] = [];
 
-      if (!alive) return;
-      if (pe) {
-        setErr(pe.message);
-        setLoading(false);
-        return;
+      for (const f of monthFields) {
+        const { data, error } = await supabase
+          .from("emi_plans")
+          .select(`id,card_id,principal,${f},monthly_emi,created_at`)
+          .order("created_at", { ascending: false });
+
+        if (!alive) return;
+
+        if (!error) {
+          usedMonthField = f;
+          planData = (data as any[]) ?? [];
+          break;
+        }
+
+        if (!isMissingColumn(error, f)) {
+          setErr(error.message);
+          setLoading(false);
+          return;
+        }
       }
 
-      const planRows = ((p as any[]) ?? []) as EmiPlan[];
-      setPlans(planRows);
+      if (!usedMonthField) {
+        const { data, error } = await supabase
+          .from("emi_plans")
+          .select("id,card_id,principal,monthly_emi,created_at")
+          .order("created_at", { ascending: false });
 
-      const planIds = planRows.map((x) => x.id);
+        if (!alive) return;
+        if (error) {
+          setErr(error.message);
+          setLoading(false);
+          return;
+        }
+        planData = (data as any[]) ?? [];
+      }
+
+      const normalizedPlans: EmiPlan[] = planData.map((p: any) => ({
+        id: String(p.id),
+        card_id: String(p.card_id),
+        principal: Number(p.principal || 0),
+        months: usedMonthField ? Number(p[usedMonthField] || 0) : null,
+        monthly_emi: Number(p.monthly_emi || 0),
+        created_at: String(p.created_at),
+      }));
+
+      setPlans(normalizedPlans);
+
+      const planIds = normalizedPlans.map((x) => x.id);
       if (planIds.length === 0) {
         setInstallments([]);
         setLoading(false);
@@ -90,7 +136,7 @@ export default function Emis() {
   }, []);
 
   const cardById = useMemo(() => {
-    const m = new Map<string, Card>();
+    const m = new Map<string, CardRow>();
     for (const c of cards) m.set(c.id, c);
     return m;
   }, [cards]);
@@ -110,8 +156,8 @@ export default function Emis() {
     setErr(null);
 
     const paidAt = nextPaid ? new Date().toISOString() : null;
-
     const { error } = await supabase.from("emi_installments").update({ paid_at: paidAt }).eq("id", id);
+
     if (error) {
       setErr(error.message);
       setBusyId(null);
@@ -126,62 +172,82 @@ export default function Emis() {
 
   return (
     <div className="p-4 text-white space-y-3">
-      <h2 className="text-lg font-semibold">EMIs</h2>
+      <div className="flex items-end justify-between">
+        <div>
+          <div className="text-2xl font-semibold tracking-tight">EMIs</div>
+          <div className="mt-1 text-sm text-white/60">Installments and payment tracking</div>
+        </div>
+      </div>
 
-      {err ? <div className="rounded-2xl bg-white/5 p-3 text-sm text-red-300">{err}</div> : null}
+      {err ? (
+        <Card className="p-4 text-sm text-red-300">
+          {err}
+        </Card>
+      ) : null}
 
       {plans.length === 0 ? (
-        <div className="rounded-2xl bg-white/5 p-4 text-sm text-white/70">No EMI plans yet.</div>
+        <Card className="p-5 text-sm text-white/70">No EMI plans yet.</Card>
       ) : null}
 
       {plans.map((plan) => {
         const card = cardById.get(plan.card_id);
         const ins = installmentsByPlan.get(plan.id) ?? [];
+
         const paidCount = ins.filter((x) => x.paid_at).length;
+        const totalCount = ins.length;
         const nextUnpaid = ins.find((x) => !x.paid_at);
+        const progress = totalCount > 0 ? paidCount / totalCount : 0;
 
         return (
-          <div key={plan.id} className="rounded-2xl bg-white/5 p-4 space-y-3">
-            <div className="flex items-start justify-between">
-              <div>
-                <div className="text-sm text-white/70">
+          <Card key={plan.id} className="p-5 space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm text-white/60">
                   {card ? `${card.name}${card.last4 ? ` •••• ${card.last4}` : ""}` : "Card"}
                 </div>
-                <div className="mt-1 text-base font-semibold">{formatINR(plan.monthly_emi)} / mo</div>
+                <div className="mt-1 text-xl font-semibold">{formatINR(plan.monthly_emi)} / mo</div>
                 <div className="mt-1 text-xs text-white/60">
-                  Principal {formatINR(plan.principal)} · {plan.months} months · Next{" "}
-                  {nextUnpaid ? formatDateShort(nextUnpaid.due_date) : "Completed"}
+                  Principal {formatINR(plan.principal)}
+                  {plan.months ? ` • ${plan.months} months` : ""}
+                  {nextUnpaid ? ` • Next ${formatDateShort(nextUnpaid.due_date)}` : " • Completed"}
                 </div>
               </div>
-              <div className="text-xs text-white/60">
-                {paidCount}/{ins.length} paid
+
+              <div className="text-right">
+                <div className="text-xs text-white/60">
+                  {paidCount}/{totalCount} paid
+                </div>
+                <div className="mt-2 w-28">
+                  <ProgressBar value={progress} />
+                </div>
               </div>
             </div>
 
             <div className="space-y-2">
-              {ins.slice(0, 12).map((it) => {
+              {ins.slice(0, 8).map((it) => {
                 const isPaid = !!it.paid_at;
                 const disabled = busyId === it.id;
 
                 return (
-                  <div key={it.id} className="flex items-center justify-between rounded-2xl bg-black/40 p-3">
+                  <div key={it.id} className="flex items-center justify-between rounded-2xl bg-black/30 border border-white/10 p-3">
                     <div>
                       <div className="text-sm">{formatDateShort(it.due_date)}</div>
-                      <div className="text-xs text-white/70">{formatINR(it.amount)}</div>
+                      <div className="mt-1 text-xs text-white/60">{formatINR(it.amount)}</div>
                     </div>
-                    <button
+                    <Button
+                      variant={isPaid ? "secondary" : "primary"}
                       disabled={disabled}
                       onClick={() => togglePaid(it.id, !isPaid)}
-                      className={`text-xs rounded-xl px-3 py-2 bg-white/5 ${disabled ? "opacity-60" : ""}`}
+                      className="px-3 py-2"
                     >
                       {isPaid ? "Paid" : "Mark paid"}
-                    </button>
+                    </Button>
                   </div>
                 );
               })}
-              {ins.length > 12 ? <div className="text-xs text-white/60">Showing first 12 installments.</div> : null}
+              {ins.length > 8 ? <div className="text-xs text-white/60">Showing next 8 installments.</div> : null}
             </div>
-          </div>
+          </Card>
         );
       })}
     </div>

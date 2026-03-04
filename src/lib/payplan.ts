@@ -6,6 +6,7 @@ export type Milestone = {
   days_to_due: number;
   due_on_date: number;
   cumulative_due: number;
+  remaining_after_buffer: number;
   required_per_day: number;
   income_until: number;
   gap: number;
@@ -49,6 +50,8 @@ export function buildMilestones(args: {
   let incomeIdx = 0;
   let incomeSum = 0;
 
+  const buffer = Number(args.startBuffer || 0);
+
   const out: Milestone[] = [];
   for (const date of args.dueDates) {
     const dueOnDate = Number(args.duesByDate.get(date) ?? 0);
@@ -61,15 +64,18 @@ export function buildMilestones(args: {
 
     const daysToDue = daysUntilISO(date, args.baseDate);
     const denom = Math.max(daysToDue, 1);
-    const requiredPerDay = cumulative / denom;
 
-    const gap = cumulative - (Number(args.startBuffer || 0) + incomeSum);
+    const remainingAfterBuffer = Math.max(0, cumulative - buffer);
+    const requiredPerDay = remainingAfterBuffer / denom;
+
+    const gap = cumulative - (buffer + incomeSum);
 
     out.push({
       due_date: date,
       days_to_due: daysToDue,
       due_on_date: dueOnDate,
       cumulative_due: cumulative,
+      remaining_after_buffer: remainingAfterBuffer,
       required_per_day: requiredPerDay,
       income_until: incomeSum,
       gap,

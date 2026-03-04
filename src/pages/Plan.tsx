@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 import { addDaysISO, formatDateShort, formatINR, todayISO } from "../lib/format";
 import { buildDuesByDate, buildMilestones, type IncomeItem } from "../lib/payplan";
+import { Card, Input } from "../components/ui";
 
 type DueRow = {
   card_id: string;
@@ -121,68 +122,90 @@ export default function Plan() {
     [milestones]
   );
 
+  const worstShortfall = useMemo(
+    () => milestones.reduce((m, x) => Math.max(m, Math.max(0, x.gap)), 0),
+    [milestones]
+  );
+
   if (loading) return <div className="p-4 text-sm text-white/70">Loading plan…</div>;
 
   return (
     <div className="p-4 text-white space-y-3">
-      <h2 className="text-lg font-semibold">Pay plan</h2>
+      <div>
+        <div className="text-2xl font-semibold tracking-tight">Pay plan</div>
+        <div className="mt-1 text-sm text-white/60">
+          Buffer reduces daily set-aside. Gap shows whether buffer + scheduled income covers dues.
+        </div>
+      </div>
 
-      {err ? <div className="rounded-2xl bg-white/5 p-3 text-sm text-red-300">{err}</div> : null}
+      {err ? (
+        <Card className="p-4 text-sm text-red-300">{err}</Card>
+      ) : null}
 
-      <div className="rounded-2xl bg-white/5 p-4 space-y-2">
+      <Card className="p-5 space-y-2">
         <div className="text-sm text-white/70">Starting buffer</div>
-        <input
+        <Input
           value={bufferStr}
           onChange={(e) => setBufferStr(e.target.value)}
           inputMode="numeric"
-          className="w-full rounded-xl bg-black/40 px-3 py-2 text-white outline-none"
           placeholder="0"
         />
-      </div>
+        <div className="text-xs text-white/60">
+          This reduces “Need/day” and recommended daily set-aside.
+        </div>
+      </Card>
 
       <div className="grid grid-cols-2 gap-3">
-        <div className="rounded-2xl bg-white/5 p-4">
-          <div className="text-xs text-white/70">Total remaining due</div>
-          <div className="mt-2 text-xl font-semibold">{formatINR(totalDue)}</div>
-        </div>
-        <div className="rounded-2xl bg-white/5 p-4">
-          <div className="text-xs text-white/70">Recommended daily set-aside</div>
-          <div className="mt-2 text-xl font-semibold">{formatINR(recommendedDaily)}</div>
-        </div>
+        <Card className="p-5">
+          <div className="text-xs text-white/60">Total remaining due</div>
+          <div className="mt-2 text-2xl font-semibold">{formatINR(totalDue)}</div>
+        </Card>
+        <Card className="p-5">
+          <div className="text-xs text-white/60">Recommended daily set-aside</div>
+          <div className="mt-2 text-2xl font-semibold">{formatINR(recommendedDaily)}</div>
+          <div className={`mt-2 text-xs ${worstShortfall > 0 ? "text-red-300" : "text-white/60"}`}>
+            Worst shortfall: {formatINR(worstShortfall)}
+          </div>
+        </Card>
       </div>
 
-      <div className="rounded-2xl bg-white/5 p-4">
+      <Card className="p-5">
         <div className="text-sm text-white/70">Milestones</div>
 
         {milestones.length === 0 ? (
           <div className="mt-2 text-sm text-white/70">No upcoming dues.</div>
         ) : (
-          <div className="mt-3 space-y-2">
-            {milestones.map((m) => (
-              <div key={m.due_date} className="rounded-2xl bg-black/40 p-3">
-                <div className="flex items-start justify-between">
-                  <div>
-                    <div className="text-sm">
-                      {formatDateShort(m.due_date)} • {m.days_to_due} days
+          <div className="mt-4 space-y-2">
+            {milestones.map((m) => {
+              const covered = m.gap <= 0;
+              return (
+                <div key={m.due_date} className="rounded-3xl bg-black/30 border border-white/10 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <div className="text-base">
+                        {formatDateShort(m.due_date)} <span className="text-white/60">• {m.days_to_due} days</span>
+                      </div>
+                      <div className="mt-2 text-xs text-white/60">
+                        Due that day {formatINR(m.due_on_date)} • Cumulative {formatINR(m.cumulative_due)}
+                      </div>
+                      <div className="mt-1 text-xs text-white/60">
+                        Remaining after buffer {formatINR(m.remaining_after_buffer)} • Income till then {formatINR(m.income_until)}
+                      </div>
                     </div>
-                    <div className="mt-1 text-xs text-white/60">
-                      Due that day {formatINR(m.due_on_date)} • Income till then {formatINR(m.income_until)}
-                    </div>
-                  </div>
 
-                  <div className="text-right">
-                    <div className="text-sm font-semibold">{formatINR(m.cumulative_due)}</div>
-                    <div className="mt-1 text-xs text-white/70">Need {formatINR(m.required_per_day)}/day</div>
-                    <div className={`mt-1 text-xs ${m.gap <= 0 ? "text-white/60" : "text-red-300"}`}>
-                      Gap {formatINR(m.gap)}
+                    <div className="text-right">
+                      <div className="text-sm font-semibold">Need {formatINR(m.required_per_day)}/day</div>
+                      <div className={`mt-2 text-xs ${covered ? "text-white/60" : "text-red-300"}`}>
+                        {covered ? `Covered (surplus ${formatINR(Math.abs(m.gap))})` : `Short by ${formatINR(m.gap)}`}
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
-      </div>
+      </Card>
     </div>
   );
 }
