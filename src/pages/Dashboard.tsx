@@ -137,7 +137,6 @@ for (const field of candidates) {
 
         <div className="flex items-center gap-2">
           <Link to="/plan"><Button variant="ghost" className="px-3 py-2">Plan</Button></Link>
-          <Link to="/emis"><Button variant="ghost" className="px-3 py-2">EMIs</Button></Link>
           <Button variant="ghost" className="px-3 py-2" onClick={signOut}>Sign out</Button>
         </div>
       </div>
