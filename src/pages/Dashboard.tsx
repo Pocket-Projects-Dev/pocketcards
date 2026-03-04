@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 import { addDaysISO, formatDateShort, formatINR, todayISO } from "../lib/format";
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Link } from "react-router-dom";
 
 const [err, setErr] = useState<string | null>(null);
 
@@ -143,7 +144,7 @@ useEffect(() => {
         <h2 className="text-lg font-semibold">Dashboard</h2>
         <button onClick={signOut} className="text-sm text-white/70">Sign out</button>
       </div>
-
+      <Link to="/plan" className="text-sm text-white/70">Plan</Link>
       {loading ? (
         <div className="mt-4 text-sm text-white/70">Loading…</div>
       ) : (
