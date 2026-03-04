@@ -1,65 +1,79 @@
-function round2(n: number) {
-  return Math.round((n + Number.EPSILON) * 100) / 100;
-}
+type BuildArgs = {
+  principal: number;
+  annualRate: number;
+  months: number;
+  firstDueDate: string; // YYYY-MM-DD
+};
 
-function toISO(d: Date) {
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
+export type EmiInstallment = {
+  index: number;
+  due_date: string;
+  amount: number;
+  principal_component: number;
+  interest_component: number;
+};
+
+function addMonthsISO(iso: string, months: number) {
+  const d = new Date(`${iso}T00:00:00.000Z`);
+  const day = d.getUTCDate();
+  d.setUTCMonth(d.getUTCMonth() + months);
+
+  // try to preserve day-of-month where possible
+  const maxDay = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+  d.setUTCDate(Math.min(day, maxDay));
+
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
 }
 
-export type EmiInstallment = {
-  installmentNo: number;
-  dueDate: string;
-  principal: number;
-  interest: number;
-  amount: number;
-};
+export function buildEmiSchedule(args: BuildArgs) {
+  const P = Number(args.principal || 0);
+  const n = Math.max(1, Math.floor(Number(args.months || 0)));
+  const r = Number(args.annualRate || 0) / 12 / 100;
 
-export function buildEmiSchedule(args: {
-  principal: number;
-  annualRate: number; // percent
-  months: number;
-  firstDueDate: string; // YYYY-MM-DD
-}) {
-  const { principal, annualRate, months, firstDueDate } = args;
-  const r = annualRate <= 0 ? 0 : annualRate / 12 / 100;
+  let monthlyEmi = 0;
+  if (r === 0) monthlyEmi = P / n;
+  else {
+    const pow = Math.pow(1 + r, n);
+    monthlyEmi = (P * r * pow) / (pow - 1);
+  }
 
-  const monthlyEmi =
-    r === 0
-      ? round2(principal / months)
-      : round2((principal * r * Math.pow(1 + r, months)) / (Math.pow(1 + r, months) - 1));
-
-  let outstanding = principal;
-  const first = new Date(`${firstDueDate}T00:00:00`);
-  const day = first.getDate(); // safe because we only use 1-28 typically
+  monthlyEmi = Math.round(monthlyEmi);
 
   const installments: EmiInstallment[] = [];
+  let balance = P;
   let totalInterest = 0;
 
-  for (let i = 1; i <= months; i++) {
-    const due = new Date(first.getFullYear(), first.getMonth() + (i - 1), day);
-    const interest = r === 0 ? 0 : round2(outstanding * r);
+  for (let i = 1; i <= n; i++) {
+    const interest = Math.round(balance * r);
+    let principalComp = monthlyEmi - interest;
 
-    let principalComp = round2(monthlyEmi - interest);
-    if (i === months) {
-      principalComp = round2(outstanding); // close out balance
+    if (i === n) {
+      // final adjust to clear rounding
+      principalComp = balance;
     }
 
-    const amount = round2(principalComp + interest);
-    outstanding = round2(outstanding - principalComp);
-    totalInterest = round2(totalInterest + interest);
+    const amt = principalComp + interest;
+    balance = Math.max(0, balance - principalComp);
+    totalInterest += interest;
 
     installments.push({
-      installmentNo: i,
-      dueDate: toISO(due),
-      principal: principalComp,
-      interest,
-      amount,
+      index: i,
+      due_date: addMonthsISO(args.firstDueDate, i - 1),
+      amount: amt,
+      principal_component: principalComp,
+      interest_component: interest,
     });
   }
 
-  const totalPayable = round2(installments.reduce((s, x) => s + x.amount, 0));
-  return { monthlyEmi, totalPayable, totalInterest, installments };
+  const totalPayable = installments.reduce((s, x) => s + x.amount, 0);
+
+  return {
+    monthlyEmi,
+    totalPayable,
+    totalInterest,
+    installments,
+  };
 }

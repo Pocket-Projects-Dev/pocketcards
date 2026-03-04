@@ -1,23 +1,25 @@
 import { Link } from "react-router-dom";
 
-function Action({ to, title, desc }: { to: string; title: string; desc: string }) {
+function Tile(props: { to: string; title: string; subtitle: string }) {
   return (
-    <Link to={to} className="block rounded-2xl bg-white/5 p-4">
-      <div className="text-base font-medium text-white">{title}</div>
-      <div className="mt-1 text-sm text-white/70">{desc}</div>
+    <Link to={props.to} className="block rounded-2xl bg-white/5 p-4">
+      <div className="text-base font-medium">{props.title}</div>
+      <div className="mt-1 text-sm text-white/70">{props.subtitle}</div>
     </Link>
   );
 }
 
 export default function AddHub() {
   return (
-    <div className="p-4 text-white">
+    <div className="p-4 space-y-3">
       <h2 className="text-lg font-semibold">Add</h2>
-      <div className="mt-4 space-y-3">
-        <Action to="/add/spend" title="Spend" desc="Normal card spend (counts in cycle due)" />
-        <Action to="/add/payment" title="Payment" desc="Log what you paid to a card" />
-        <Action to="/add/income" title="Income" desc="Salary or other inflow used for bills" />
-        <Action to="/add/emi" title="EMI" desc="Create EMI plan + schedule, store purchase record" />
+      <div className="space-y-3">
+        <Tile to="/add/spend" title="Spend" subtitle="Add a transaction in this billing cycle" />
+        <Tile to="/add/payment" title="Payment" subtitle="Log a card payment" />
+        <Tile to="/add/income" title="Income" subtitle="Add salary/income event" />
+        <Tile to="/add/emi" title="EMI" subtitle="Create EMI plan + schedule" />
+        <Tile to="/emis" title="EMIs" subtitle="View installments and mark paid" />
+        <Tile to="/plan" title="Pay plan" subtitle="Daily set-aside and milestones" />
       </div>
     </div>
   );

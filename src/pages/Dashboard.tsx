@@ -4,8 +4,6 @@ import { addDaysISO, formatDateShort, formatINR, todayISO } from "../lib/format"
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Link } from "react-router-dom";
 
-const [err, setErr] = useState<string | null>(null);
-
 type CycleRow = {
   card_id: string;
   card_name: string;
@@ -22,129 +20,128 @@ type CycleRow = {
 };
 
 type MonthlyRow = { month: string; spend: number };
-type IncomeRow = { amount: number };
+
+function isMissingColumn(err: any, field: string) {
+  const msg = String(err?.message || "").toLowerCase();
+  return msg.includes("does not exist") && msg.includes(field.toLowerCase());
+}
 
 export default function Dashboard() {
   const [rows, setRows] = useState<CycleRow[]>([]);
   const [monthly, setMonthly] = useState<MonthlyRow[]>([]);
   const [income30, setIncome30] = useState<number>(0);
   const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
 
   const signOut = async () => {
     await supabase.auth.signOut();
   };
 
-  {err ? (
-  <div className="mt-3 rounded-2xl bg-white/5 p-3 text-sm text-red-300">
-    {err}
-  </div>
-) : null}
+  useEffect(() => {
+    let alive = true;
 
-useEffect(() => {
-  let alive = true;
+    (async () => {
+      setLoading(true);
+      setErr(null);
 
-  (async () => {
-    setLoading(true);
-    setErr(null);
+      const { data: dueData, error: dueErr } = await supabase
+        .from("card_cycle_summary")
+        .select(
+          "card_id,card_name,issuer,last4,due_date,days_to_due,cycle_spend,emi_due,total_due,paid_to_date,remaining_due,per_day_to_due"
+        )
+        .order("due_date", { ascending: true });
 
-    const { data: dueData, error: dueErr } = await supabase
-      .from("card_cycle_summary")
-      .select("card_id,card_name,issuer,last4,due_date,days_to_due,cycle_spend,emi_due,total_due,paid_to_date,remaining_due,per_day_to_due")
-      .order("due_date", { ascending: true });
-
-    console.log("card_cycle_summary", { dueErr, dueData });
-
-    if (dueErr) {
-      if (alive) {
+      if (!alive) return;
+      if (dueErr) {
         setErr(`card_cycle_summary: ${dueErr.message}`);
         setLoading(false);
+        return;
       }
-      return;
-    }
 
-    if (alive) {
-      setRows(((dueData as any[]) ?? []).map((x) => ({
-        ...x,
-        cycle_spend: Number(x.cycle_spend || 0),
-        emi_due: Number(x.emi_due || 0),
-        total_due: Number(x.total_due || 0),
-        paid_to_date: Number(x.paid_to_date || 0),
-        remaining_due: Number(x.remaining_due || 0),
-        per_day_to_due: Number(x.per_day_to_due || 0),
-      })) as CycleRow[]);
-    }
+      setRows(
+        (((dueData as any[]) ?? []).map((x) => ({
+          ...x,
+          cycle_spend: Number(x.cycle_spend || 0),
+          emi_due: Number(x.emi_due || 0),
+          total_due: Number(x.total_due || 0),
+          paid_to_date: Number(x.paid_to_date || 0),
+          remaining_due: Number(x.remaining_due || 0),
+          per_day_to_due: Number(x.per_day_to_due || 0),
+        })) as CycleRow[])
+      );
 
-    const { data: monthlyData, error: monthlyErr } = await supabase
-      .from("monthly_spend")
-      .select("month,spend")
-      .order("month", { ascending: false })
-      .limit(6);
+      const { data: monthlyData, error: monthlyErr } = await supabase
+        .from("monthly_spend")
+        .select("month,spend")
+        .order("month", { ascending: false })
+        .limit(6);
 
-    console.log("monthly_spend", { monthlyErr, monthlyData });
-
-    if (monthlyErr) {
-      if (alive) {
+      if (!alive) return;
+      if (monthlyErr) {
         setErr(`monthly_spend: ${monthlyErr.message}`);
         setLoading(false);
+        return;
       }
-      return;
-    }
 
-    const monthlyNorm = ((monthlyData as any[]) ?? [])
-      .map((m) => ({ month: String(m.month).slice(0, 7), spend: Number(m.spend || 0) }))
-      .reverse();
+      const monthlyNorm = ((monthlyData as any[]) ?? [])
+        .map((m) => ({ month: String(m.month).slice(0, 7), spend: Number(m.spend || 0) }))
+        .reverse();
+      setMonthly(monthlyNorm);
 
-    if (alive) setMonthly(monthlyNorm);
+      const from = todayISO();
+      const to = addDaysISO(30);
 
-    const from = todayISO();
-    const to = addDaysISO(30);
+      const candidates = ["received_on", "event_date", "received_at", "date"];
+      let incomeTotal = 0;
 
-    const { data: incData, error: incErr } = await supabase
-      .from("income_events")
-      .select("amount")
-      .gte("received_on", from)
-      .lte("received_on", to);
+      for (const field of candidates) {
+        const { data, error } = await supabase
+          .from("income_events")
+          .select(`amount,${field}`)
+          .gte(field, from)
+          .lte(field, to);
 
-    console.log("income_events next30d", { incErr, from, to, incData });
+        if (!alive) return;
 
-    if (incErr) {
-      if (alive) {
-        setErr(`income_events: ${incErr.message}`);
-        setLoading(false);
+        if (!error) {
+          incomeTotal = (((data as any[]) ?? []) as any[]).reduce((s, r) => s + Number(r.amount || 0), 0);
+          break;
+        }
+
+        if (!isMissingColumn(error, field)) {
+          setErr(`income_events: ${error.message}`);
+          setLoading(false);
+          return;
+        }
       }
-      return;
-    }
 
-    const incTotal = ((incData as IncomeRow[]) ?? []).reduce(
-      (s, x) => s + Number(x.amount || 0),
-      0
-    );
-
-    if (alive) {
-      setIncome30(incTotal);
+      setIncome30(incomeTotal);
       setLoading(false);
-    }
-  })();
+    })();
 
-  return () => {
-    alive = false;
-  };
-}, []);
+    return () => {
+      alive = false;
+    };
+  }, []);
 
-  const totalDue = useMemo(
-    () => rows.reduce((s, r) => s + Number(r.remaining_due || 0), 0),
-    [rows]
-  );
-
+  const totalDue = useMemo(() => rows.reduce((s, r) => s + Number(r.remaining_due || 0), 0), [rows]);
   const gap = useMemo(() => income30 - totalDue, [income30, totalDue]);
 
   return (
     <div className="p-4 text-white">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold">Dashboard</h2>
-        <button onClick={signOut} className="text-sm text-white/70">Sign out</button>
+        <div className="flex items-center gap-3">
+          <Link to="/plan" className="text-sm text-white/70">Plan</Link>
+          <Link to="/emis" className="text-sm text-white/70">EMIs</Link>
+          <button onClick={signOut} className="text-sm text-white/70">Sign out</button>
+        </div>
       </div>
-      <Link to="/plan" className="text-sm text-white/70">Plan</Link>
+
+      {err ? (
+        <div className="mt-3 rounded-2xl bg-white/5 p-3 text-sm text-red-300">{err}</div>
+      ) : null}
+
       {loading ? (
         <div className="mt-4 text-sm text-white/70">Loading…</div>
       ) : (

@@ -1,117 +1,97 @@
-import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
 import { supabase } from "../lib/supabase";
 import { todayISO } from "../lib/format";
+import { useSession } from "../hooks/useSession";
+import { useNavigate } from "react-router-dom";
 
-type Card = { id: string; name: string };
+type Card = { id: string; name: string; last4: string | null };
+
+function isMissingColumn(err: any, field: string) {
+  const msg = String(err?.message || "").toLowerCase();
+  return msg.includes("does not exist") && msg.includes(field.toLowerCase());
+}
 
 export default function AddPayment() {
+  const { session } = useSession();
   const nav = useNavigate();
+
   const [cards, setCards] = useState<Card[]>([]);
   const [cardId, setCardId] = useState("");
-  const [amount, setAmount] = useState<string>("");
-  const [paidOn, setPaidOn] = useState<string>(todayISO());
-  const [notes, setNotes] = useState("");
-
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [amount, setAmount] = useState("");
+  const [paidOn, setPaidOn] = useState(todayISO());
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     (async () => {
-      setLoading(true);
-      const { data } = await supabase.from("cards").select("id,name").order("created_at", { ascending: false });
-      const list = (data as Card[]) ?? [];
+      const { data } = await supabase.from("cards").select("id,name,last4").order("created_at", { ascending: false });
+      const list = ((data as any[]) ?? []) as Card[];
       setCards(list);
-      if (list[0]) setCardId(list[0].id);
-      setLoading(false);
+      if (!cardId && list[0]?.id) setCardId(list[0].id);
     })();
   }, []);
 
-  const canSave = useMemo(() => {
-    const n = Number(amount);
-    return !!cardId && !Number.isNaN(n) && n > 0 && !!paidOn;
-  }, [cardId, amount, paidOn]);
-
   const save = async () => {
-    setErr(null);
-    if (!canSave) return setErr("Pick a card, amount, and date.");
-    setSaving(true);
+    setBusy(true);
+    const userId = session?.user?.id;
 
-    const { error } = await supabase.from("payments").insert({
-      card_id: cardId,
-      paid_on: paidOn,
-      amount: Number(amount),
-      notes: notes.trim() || null,
-    });
+    const dateFields = ["paid_on", "paid_at", "received_on", "date"];
 
-    setSaving(false);
-    if (error) return setErr(error.message);
-    nav("/");
+    for (const field of dateFields) {
+      const payload: any = {
+        user_id: userId,
+        card_id: cardId,
+        amount: Number(amount || 0),
+      };
+      payload[field] = paidOn;
+
+      const { error } = await supabase.from("payments").insert(payload);
+      if (!error) {
+        setBusy(false);
+        nav("/");
+        return;
+      }
+      if (!isMissingColumn(error, field)) {
+        setBusy(false);
+        alert(error.message);
+        return;
+      }
+    }
+
+    setBusy(false);
+    alert("Could not find a valid date column on payments table. Check schema.");
   };
 
   return (
-    <div className="p-4 text-white">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Add payment</h2>
-        <button onClick={() => nav(-1)} className="text-sm text-white/70">Back</button>
-      </div>
+    <div className="p-4 space-y-3">
+      <h2 className="text-lg font-semibold">Add payment</h2>
 
-      {loading ? (
-        <div className="mt-4 text-sm text-white/70">Loading…</div>
-      ) : cards.length === 0 ? (
-        <div className="mt-4 rounded-2xl bg-white/5 p-4 text-sm text-white/70">Add a card first.</div>
-      ) : (
-        <div className="mt-4 space-y-3">
-          {err ? <div className="rounded-2xl bg-white/5 p-4 text-sm text-red-300">{err}</div> : null}
-
-          <div className="rounded-2xl bg-white/5 p-3">
-            <div className="text-xs text-white/70">Card</div>
-            <select
-              className="mt-2 w-full rounded-xl bg-black/40 p-3 outline-none"
-              value={cardId}
-              onChange={(e) => setCardId(e.target.value)}
-            >
-              {cards.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
-          </div>
-
-          <input
-            className="w-full rounded-2xl bg-white/5 p-3 outline-none text-lg"
-            placeholder="Amount"
-            inputMode="decimal"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-          />
-
-          <div className="rounded-2xl bg-white/5 p-3">
-            <div className="text-xs text-white/70">Paid on</div>
-            <input
-              className="mt-2 w-full rounded-xl bg-black/40 p-3 outline-none"
-              type="date"
-              value={paidOn}
-              onChange={(e) => setPaidOn(e.target.value)}
-            />
-          </div>
-
-          <input
-            className="w-full rounded-2xl bg-white/5 p-3 outline-none"
-            placeholder="Notes (optional)"
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-          />
-
-          <button
-            onClick={save}
-            disabled={!canSave || saving}
-            className="w-full rounded-2xl bg-white text-black px-4 py-3 font-medium disabled:opacity-60"
-          >
-            {saving ? "Saving…" : "Save payment"}
-          </button>
+      <div className="rounded-2xl bg-white/5 p-4 space-y-3">
+        <div>
+          <div className="text-xs text-white/70">Card</div>
+          <select value={cardId} onChange={(e) => setCardId(e.target.value)} className="mt-1 w-full rounded-xl bg-black/40 px-3 py-2">
+            {cards.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}{c.last4 ? ` •••• ${c.last4}` : ""}
+              </option>
+            ))}
+          </select>
         </div>
-      )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <div className="text-xs text-white/70">Amount</div>
+            <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="numeric" className="mt-1 w-full rounded-xl bg-black/40 px-3 py-2 outline-none" />
+          </div>
+          <div>
+            <div className="text-xs text-white/70">Date</div>
+            <input value={paidOn} onChange={(e) => setPaidOn(e.target.value)} type="date" className="mt-1 w-full rounded-xl bg-black/40 px-3 py-2 outline-none" />
+          </div>
+        </div>
+
+        <button onClick={save} disabled={busy || !cardId || Number(amount || 0) <= 0} className="w-full rounded-2xl bg-white/10 px-4 py-3 text-sm">
+          {busy ? "Saving…" : "Save payment"}
+        </button>
+      </div>
     </div>
   );
 }

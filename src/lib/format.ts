@@ -1,14 +1,10 @@
-export function formatINR(value: number) {
+export function formatINR(n: number) {
+  const v = Number(n || 0);
   return new Intl.NumberFormat("en-IN", {
     style: "currency",
     currency: "INR",
     maximumFractionDigits: 0,
-  }).format(value);
-}
-
-export function formatDateShort(isoDate: string) {
-  const d = new Date(`${isoDate}T00:00:00`);
-  return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
+  }).format(v);
 }
 
 export function todayISO() {
@@ -26,4 +22,10 @@ export function addDaysISO(days: number) {
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
+}
+
+export function formatDateShort(iso: string) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return d.toLocaleDateString("en-IN", { month: "short", day: "2-digit" });
 }

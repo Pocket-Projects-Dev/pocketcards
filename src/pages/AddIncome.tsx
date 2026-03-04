@@ -1,79 +1,77 @@
-import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState } from "react";
 import { supabase } from "../lib/supabase";
 import { todayISO } from "../lib/format";
+import { useSession } from "../hooks/useSession";
+import { useNavigate } from "react-router-dom";
+
+function isMissingColumn(err: any, field: string) {
+  const msg = String(err?.message || "").toLowerCase();
+  return msg.includes("does not exist") && msg.includes(field.toLowerCase());
+}
 
 export default function AddIncome() {
+  const { session } = useSession();
   const nav = useNavigate();
-  const [amount, setAmount] = useState<string>("");
-  const [receivedOn, setReceivedOn] = useState<string>(todayISO());
-  const [source, setSource] = useState<string>("Salary");
 
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const canSave = useMemo(() => {
-    const n = Number(amount);
-    return !Number.isNaN(n) && n > 0 && !!receivedOn;
-  }, [amount, receivedOn]);
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(todayISO());
+  const [source, setSource] = useState("");
+  const [busy, setBusy] = useState(false);
 
   const save = async () => {
-    setErr(null);
-    if (!canSave) return setErr("Enter amount and date.");
-    setSaving(true);
+    setBusy(true);
+    const userId = session?.user?.id;
 
-    const { error } = await supabase.from("income_events").insert({
-      received_on: receivedOn,
-      amount: Number(amount),
-      source: source.trim() || null,
-    });
+    const dateFields = ["received_on", "event_date", "received_at", "date"];
 
-    setSaving(false);
-    if (error) return setErr(error.message);
-    nav("/");
+    for (const field of dateFields) {
+      const payload: any = {
+        user_id: userId,
+        amount: Number(amount || 0),
+        source: source.trim() || null,
+      };
+      payload[field] = date;
+
+      const { error } = await supabase.from("income_events").insert(payload);
+      if (!error) {
+        setBusy(false);
+        nav("/");
+        return;
+      }
+      if (!isMissingColumn(error, field)) {
+        setBusy(false);
+        alert(error.message);
+        return;
+      }
+    }
+
+    setBusy(false);
+    alert("Could not find a valid date column on income_events table. Check schema.");
   };
 
   return (
-    <div className="p-4 text-white">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Add income</h2>
-        <button onClick={() => nav(-1)} className="text-sm text-white/70">Back</button>
-      </div>
+    <div className="p-4 space-y-3">
+      <h2 className="text-lg font-semibold">Add income</h2>
 
-      <div className="mt-4 space-y-3">
-        {err ? <div className="rounded-2xl bg-white/5 p-4 text-sm text-red-300">{err}</div> : null}
-
-        <input
-          className="w-full rounded-2xl bg-white/5 p-3 outline-none text-lg"
-          placeholder="Amount"
-          inputMode="decimal"
-          value={amount}
-          onChange={(e) => setAmount(e.target.value)}
-        />
-
-        <div className="rounded-2xl bg-white/5 p-3">
-          <div className="text-xs text-white/70">Received on</div>
-          <input
-            className="mt-2 w-full rounded-xl bg-black/40 p-3 outline-none"
-            type="date"
-            value={receivedOn}
-            onChange={(e) => setReceivedOn(e.target.value)}
-          />
+      <div className="rounded-2xl bg-white/5 p-4 space-y-3">
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <div className="text-xs text-white/70">Amount</div>
+            <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="numeric" className="mt-1 w-full rounded-xl bg-black/40 px-3 py-2 outline-none" />
+          </div>
+          <div>
+            <div className="text-xs text-white/70">Date</div>
+            <input value={date} onChange={(e) => setDate(e.target.value)} type="date" className="mt-1 w-full rounded-xl bg-black/40 px-3 py-2 outline-none" />
+          </div>
         </div>
 
-        <input
-          className="w-full rounded-2xl bg-white/5 p-3 outline-none"
-          placeholder="Source (optional)"
-          value={source}
-          onChange={(e) => setSource(e.target.value)}
-        />
+        <div>
+          <div className="text-xs text-white/70">Source (optional)</div>
+          <input value={source} onChange={(e) => setSource(e.target.value)} className="mt-1 w-full rounded-xl bg-black/40 px-3 py-2 outline-none" />
+        </div>
 
-        <button
-          onClick={save}
-          disabled={!canSave || saving}
-          className="w-full rounded-2xl bg-white text-black px-4 py-3 font-medium disabled:opacity-60"
-        >
-          {saving ? "Saving…" : "Save income"}
+        <button onClick={save} disabled={busy || Number(amount || 0) <= 0} className="w-full rounded-2xl bg-white/10 px-4 py-3 text-sm">
+          {busy ? "Saving…" : "Save income"}
         </button>
       </div>
     </div>

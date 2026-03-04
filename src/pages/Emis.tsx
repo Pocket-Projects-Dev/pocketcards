@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 import { formatDateShort, formatINR } from "../lib/format";
 
+type Card = { id: string; name: string; last4: string | null };
+
 type EmiPlan = {
   id: string;
   card_id: string;
@@ -9,7 +11,6 @@ type EmiPlan = {
   months: number;
   monthly_emi: number;
   created_at: string;
-  cards?: { name: string } | null;
 };
 
 type EmiInstallment = {
@@ -21,6 +22,7 @@ type EmiInstallment = {
 };
 
 export default function Emis() {
+  const [cards, setCards] = useState<Card[]>([]);
   const [plans, setPlans] = useState<EmiPlan[]>([]);
   const [installments, setInstallments] = useState<EmiInstallment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -34,9 +36,18 @@ export default function Emis() {
       setLoading(true);
       setErr(null);
 
+      const { data: c, error: ce } = await supabase.from("cards").select("id,name,last4");
+      if (!alive) return;
+      if (ce) {
+        setErr(ce.message);
+        setLoading(false);
+        return;
+      }
+      setCards(((c as any[]) ?? []) as Card[]);
+
       const { data: p, error: pe } = await supabase
         .from("emi_plans")
-        .select("id,card_id,principal,months,monthly_emi,created_at,cards(name)")
+        .select("id,card_id,principal,months,monthly_emi,created_at")
         .order("created_at", { ascending: false });
 
       if (!alive) return;
@@ -69,7 +80,7 @@ export default function Emis() {
         return;
       }
 
-      setInstallments((((ins as any[]) ?? []) as EmiInstallment[]));
+      setInstallments(((ins as any[]) ?? []) as EmiInstallment[]);
       setLoading(false);
     })();
 
@@ -77,6 +88,12 @@ export default function Emis() {
       alive = false;
     };
   }, []);
+
+  const cardById = useMemo(() => {
+    const m = new Map<string, Card>();
+    for (const c of cards) m.set(c.id, c);
+    return m;
+  }, [cards]);
 
   const installmentsByPlan = useMemo(() => {
     const map = new Map<string, EmiInstallment[]>();
@@ -88,46 +105,37 @@ export default function Emis() {
     return map;
   }, [installments]);
 
-  async function togglePaid(installmentId: string, nextPaid: boolean) {
-    setBusyId(installmentId);
+  const togglePaid = async (id: string, nextPaid: boolean) => {
+    setBusyId(id);
     setErr(null);
 
-    const nextPaidAt = nextPaid ? new Date().toISOString() : null;
+    const paidAt = nextPaid ? new Date().toISOString() : null;
 
-    const { error } = await supabase
-      .from("emi_installments")
-      .update({ paid_at: nextPaidAt })
-      .eq("id", installmentId);
-
+    const { error } = await supabase.from("emi_installments").update({ paid_at: paidAt }).eq("id", id);
     if (error) {
       setErr(error.message);
       setBusyId(null);
       return;
     }
 
-    setInstallments((prev) =>
-      prev.map((x) => (x.id === installmentId ? { ...x, paid_at: nextPaidAt } : x))
-    );
+    setInstallments((prev) => prev.map((x) => (x.id === id ? { ...x, paid_at: paidAt } : x)));
     setBusyId(null);
-  }
+  };
 
   if (loading) return <div className="p-4 text-sm text-white/70">Loading EMIs…</div>;
 
   return (
     <div className="p-4 text-white space-y-3">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">EMIs</h2>
-      </div>
+      <h2 className="text-lg font-semibold">EMIs</h2>
 
-      {err ? (
-        <div className="rounded-2xl bg-white/5 p-3 text-sm text-red-300">{err}</div>
-      ) : null}
+      {err ? <div className="rounded-2xl bg-white/5 p-3 text-sm text-red-300">{err}</div> : null}
 
       {plans.length === 0 ? (
         <div className="rounded-2xl bg-white/5 p-4 text-sm text-white/70">No EMI plans yet.</div>
       ) : null}
 
       {plans.map((plan) => {
+        const card = cardById.get(plan.card_id);
         const ins = installmentsByPlan.get(plan.id) ?? [];
         const paidCount = ins.filter((x) => x.paid_at).length;
         const nextUnpaid = ins.find((x) => !x.paid_at);
@@ -136,7 +144,9 @@ export default function Emis() {
           <div key={plan.id} className="rounded-2xl bg-white/5 p-4 space-y-3">
             <div className="flex items-start justify-between">
               <div>
-                <div className="text-sm text-white/70">{plan.cards?.name ?? "Card"}</div>
+                <div className="text-sm text-white/70">
+                  {card ? `${card.name}${card.last4 ? ` •••• ${card.last4}` : ""}` : "Card"}
+                </div>
                 <div className="mt-1 text-base font-semibold">{formatINR(plan.monthly_emi)} / mo</div>
                 <div className="mt-1 text-xs text-white/60">
                   Principal {formatINR(plan.principal)} · {plan.months} months · Next{" "}
@@ -169,6 +179,7 @@ export default function Emis() {
                   </div>
                 );
               })}
+              {ins.length > 12 ? <div className="text-xs text-white/60">Showing first 12 installments.</div> : null}
             </div>
           </div>
         );
