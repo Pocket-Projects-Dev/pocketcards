@@ -8,6 +8,7 @@ import AddSpend from "./pages/AddSpend";
 import AddPayment from "./pages/AddPayment";
 import AddIncome from "./pages/AddIncome";
 import NewEmi from "./pages/NewEmi";
+import Emis from "./pages/Emis";
 import AppShell from "./components/AppShell";
 import { useSession } from "./hooks/useSession";
 
@@ -24,7 +25,7 @@ export default function App() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/cards" element={<Cards />} />
         <Route path="/cards/new" element={<NewCard />} />
-
+        <Route path="/emis" element={<Emis />} />
         <Route path="/add" element={<AddHub />} />
         <Route path="/add/spend" element={<AddSpend />} />
         <Route path="/add/payment" element={<AddPayment />} />
