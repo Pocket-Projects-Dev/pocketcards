@@ -1,4 +1,4 @@
-\import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { buildEmiSchedule } from "../lib/emi";
