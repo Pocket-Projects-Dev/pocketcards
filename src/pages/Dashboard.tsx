@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { supabase } from "../lib/supabase";
-import { addDaysISO, formatDateShort, formatINR, todayISO } from "../lib/format";
+import { formatDateShort, formatINR, todayISO } from "../lib/format";
 import { Button, Card, ProgressBar } from "../components/ui";
-import { buildDuesByDate, buildMilestones, type IncomeItem } from "../lib/payplan";
 import { computeFundBalance, sumTodayNet, type FundEvent } from "../lib/fund";
 import { useSession } from "../hooks/useSession";
 
@@ -22,34 +21,26 @@ type CycleRow = {
   per_day_to_due: number;
 };
 
-
-function isMissingColumn(err: any, field: string) {
-  const msg = String(err?.message || "").toLowerCase();
-  return msg.includes("does not exist") && msg.includes(field.toLowerCase());
-}
-
 export default function Dashboard() {
   const { session } = useSession();
   const userId = session?.user?.id ?? null;
 
   const [rows, setRows] = useState<CycleRow[]>([]);
-  const [income30, setIncome30] = useState<number>(0);
-  const [incomes120, setIncomes120] = useState<IncomeItem[]>([]);
   const [fundEvents, setFundEvents] = useState<FundEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const signOut = () => {
-  void (async () => {
-    try {
-      const { error } = await supabase.auth.signOut();
-      if (error) alert(error.message);
-    } catch (e: any) {
-      alert(e?.message || "Sign out failed");
-    }
-  })();
-};
+    void (async () => {
+      try {
+        const { error } = await supabase.auth.signOut();
+        if (error) alert(error.message);
+      } catch (e: any) {
+        alert(e?.message || "Sign out failed");
+      }
+    })();
+  };
 
   useEffect(() => {
     let alive = true;
@@ -70,50 +61,17 @@ export default function Dashboard() {
         return;
       }
 
-      setRows((((dueData as unknown) as any[]) ?? []).map((x) => ({
-        ...x,
-        cycle_spend: Number(x.cycle_spend || 0),
-        emi_due: Number(x.emi_due || 0),
-        total_due: Number(x.total_due || 0),
-        paid_to_date: Number(x.paid_to_date || 0),
-        remaining_due: Number(x.remaining_due || 0),
-        per_day_to_due: Number(x.per_day_to_due || 0),
-      })) as CycleRow[]);
-
-      const from = todayISO();
-      const to120 = addDaysISO(120);
-      const to30 = addDaysISO(30);
-
-      const candidates = ["received_on", "event_date", "received_at", "date"];
-      let inc: IncomeItem[] = [];
-
-      for (const field of candidates) {
-        const { data, error } = await supabase
-          .from("income_events")
-          .select("*")
-          .gte(field, from)
-          .lte(field, to120)
-          .order(field, { ascending: true });
-
-        if (!alive) return;
-
-        if (!error) {
-          const raw = ((((data as unknown) as any[]) ?? []) as any[]);
-          inc = raw
-            .map((r) => ({ date: String(r[field]).slice(0, 10), amount: Number(r.amount || 0) }))
-            .filter((r) => r.date && !Number.isNaN(r.amount));
-          break;
-        }
-
-        if (!isMissingColumn(error, field)) {
-          setErr(`income_events: ${error.message}`);
-          setLoading(false);
-          return;
-        }
-      }
-
-      setIncomes120(inc);
-      setIncome30(inc.filter((x) => x.date >= from && x.date <= to30).reduce((s, x) => s + Number(x.amount || 0), 0));
+      setRows(
+        ((((dueData as unknown) as any[]) ?? []) as any[]).map((x) => ({
+          ...x,
+          cycle_spend: Number(x.cycle_spend || 0),
+          emi_due: Number(x.emi_due || 0),
+          total_due: Number(x.total_due || 0),
+          paid_to_date: Number(x.paid_to_date || 0),
+          remaining_due: Number(x.remaining_due || 0),
+          per_day_to_due: Number(x.per_day_to_due || 0),
+        })) as CycleRow[]
+      );
 
       const { data: fe, error: feErr } = await supabase
         .from("plan_fund_events")
@@ -138,42 +96,16 @@ export default function Dashboard() {
     };
   }, []);
 
-  const fundBalance = useMemo(() => computeFundBalance(fundEvents), [fundEvents]);
-  const todayNet = useMemo(() => sumTodayNet(fundEvents, todayISO()), [fundEvents]);
-
-  const dueItems = useMemo(
-    () => rows.filter((r) => Number(r.remaining_due || 0) > 0).map((r) => ({ due_date: r.due_date, amount: Number(r.remaining_due || 0) })),
-    [rows]
-  );
-
-  const totalDue = useMemo(() => dueItems.reduce((s, x) => s + x.amount, 0), [dueItems]);
-  const gap = useMemo(() => income30 - totalDue, [income30, totalDue]);
-
   const nextCard = useMemo(() => {
-    const list = rows.filter((r) => Number(r.remaining_due || 0) > 0);
-    return (list[0] ?? rows[0] ?? null) as CycleRow | null;
+    const dueList = rows.filter((r) => Number(r.remaining_due || 0) > 0);
+    return (dueList[0] ?? rows[0] ?? null) as CycleRow | null;
   }, [rows]);
 
-  const { duesByDate, dueDates } = useMemo(() => buildDuesByDate(dueItems), [dueItems]);
+  const totalDue = useMemo(() => rows.reduce((s, r) => s + Number(r.remaining_due || 0), 0), [rows]);
+  const todaySuggestion = useMemo(() => Math.ceil(rows.reduce((s, r) => s + Number(r.per_day_to_due || 0), 0)), [rows]);
 
-  const milestones = useMemo(
-    () =>
-      buildMilestones({
-        baseDate: todayISO(),
-        dueDates,
-        duesByDate,
-        incomes: incomes120,
-        startBuffer: fundBalance,
-      }),
-    [dueDates, duesByDate, incomes120, fundBalance]
-  );
-
-  const recommendedDaily = useMemo(
-    () => milestones.reduce((m, x) => Math.max(m, Number(x.required_per_day || 0)), 0),
-    [milestones]
-  );
-
-  const todaySuggestion = useMemo(() => Math.ceil(recommendedDaily || 0), [recommendedDaily]);
+  const fundBalance = useMemo(() => computeFundBalance(fundEvents), [fundEvents]);
+  const todayNet = useMemo(() => sumTodayNet(fundEvents, todayISO()), [fundEvents]);
 
   const fundProgress = useMemo(() => {
     if (totalDue <= 0) return 0;
@@ -250,10 +182,6 @@ export default function Dashboard() {
             <Link to={`/add/payment?card=${nextCard.card_id}`}><Button className="w-full">Add payment</Button></Link>
             <Link to={`/add/emi?card=${nextCard.card_id}`}><Button className="w-full">Convert EMI</Button></Link>
           </div>
-
-          <div className="text-xs text-white/60">
-            Tip: Everything you log routes back to the statement so you stay in one flow.
-          </div>
         </Card>
       ) : null}
 
@@ -282,21 +210,6 @@ export default function Dashboard() {
         </div>
       </Card>
 
-      <div className="grid grid-cols-2 gap-3">
-        <Card className="p-5">
-          <div className="text-xs text-white/60">Remaining due (next)</div>
-          <div className="mt-2 text-2xl font-semibold">{formatINR(totalDue)}</div>
-        </Card>
-
-        <Card className="p-5">
-          <div className="text-xs text-white/60">Income (next 30d)</div>
-          <div className="mt-2 text-2xl font-semibold">{formatINR(income30)}</div>
-          <div className={`mt-2 text-xs ${gap >= 0 ? "text-white/60" : "text-red-300"}`}>
-            Gap: {formatINR(gap)}
-          </div>
-        </Card>
-      </div>
-
       <Card className="p-5">
         <div className="text-sm text-white/70">Upcoming dues</div>
 
@@ -304,42 +217,32 @@ export default function Dashboard() {
           <div className="mt-3 text-sm text-white/70">Add a card to see due planning.</div>
         ) : (
           <div className="mt-4 space-y-2">
-            {rows.map((r) => {
-              const denom = Math.max(1, Number(r.total_due || 0));
-              const progress = Math.max(0, Math.min(1, Number(r.paid_to_date || 0) / denom));
-              const urgent = r.days_to_due <= 5;
-
-              return (
-                <Link key={r.card_id} to={`/cards/${r.card_id}/statement`}>
-                  <div className="rounded-3xl bg-black/30 border border-white/10 p-4 hover:bg-white/[0.03] transition">
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="min-w-0">
-                        <div className="text-base font-medium">
-                          {r.card_name}{r.last4 ? ` •••• ${r.last4}` : ""}
-                        </div>
-                        <div className={`mt-1 text-sm ${urgent ? "text-red-200" : "text-white/60"}`}>
-                          Due {formatDateShort(r.due_date)} • {r.days_to_due} days
-                        </div>
-                        <div className="mt-3">
-                          <ProgressBar value={progress} />
-                          <div className="mt-2 text-xs text-white/60">
-                            Paid {formatINR(r.paid_to_date)} • Total {formatINR(r.total_due)}
-                          </div>
-                        </div>
+            {rows.map((r) => (
+              <Link key={r.card_id} to={`/cards/${r.card_id}/statement`}>
+                <div className="rounded-3xl bg-black/30 border border-white/10 p-4 hover:bg-white/[0.03] transition">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <div className="text-base font-medium">
+                        {r.card_name}{r.last4 ? ` •••• ${r.last4}` : ""}
                       </div>
+                      <div className={`mt-1 text-sm ${r.days_to_due <= 5 ? "text-red-200" : "text-white/60"}`}>
+                        Due {formatDateShort(r.due_date)} • {r.days_to_due} days
+                      </div>
+                      <div className="mt-2 text-xs text-white/60">
+                        Need ~{formatINR(r.per_day_to_due)}/day
+                      </div>
+                    </div>
 
-                      <div className="text-right">
-                        <div className="text-lg font-semibold">{formatINR(r.remaining_due)}</div>
-                        <div className="mt-1 text-xs text-white/60">Need ~{formatINR(r.per_day_to_due)}/day</div>
-                        <div className="mt-2 text-xs text-white/50">
-                          Spend {formatINR(r.cycle_spend)} • EMI {formatINR(r.emi_due)}
-                        </div>
+                    <div className="text-right">
+                      <div className="text-lg font-semibold">{formatINR(r.remaining_due)}</div>
+                      <div className="mt-2 text-xs text-white/50">
+                        Spend {formatINR(r.cycle_spend)} • EMI {formatINR(r.emi_due)}
                       </div>
                     </div>
                   </div>
-                </Link>
-              );
-            })}
+                </div>
+              </Link>
+            ))}
           </div>
         )}
       </Card>

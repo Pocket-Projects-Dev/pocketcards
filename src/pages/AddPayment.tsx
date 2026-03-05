@@ -24,13 +24,17 @@ export default function AddPayment() {
 
   const nav = useNavigate();
   const location = useLocation();
+  const qs = useMemo(() => new URLSearchParams(location.search), [location.search]);
 
-  const preCardId = useMemo(() => new URLSearchParams(location.search).get("card") ?? "", [location.search]);
+  const preCardId = qs.get("card") ?? "";
+  const preAmount = qs.get("amount") ?? "";
+  const preWithdraw = (qs.get("withdraw") ?? "") === "1";
 
   const [cards, setCards] = useState<CardRow[]>([]);
   const [cardId, setCardId] = useState("");
-  const [amount, setAmount] = useState("");
+  const [amount, setAmount] = useState(preAmount);
   const [paidOn, setPaidOn] = useState(todayISO());
+  const [withdraw, setWithdraw] = useState(preWithdraw);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -62,6 +66,7 @@ export default function AddPayment() {
   const save = async () => {
     if (!userId) return alert("Not signed in.");
     if (!cardId) return;
+
     const amt = Number(amount || 0);
     if (!(amt > 0)) return;
 
@@ -69,7 +74,7 @@ export default function AddPayment() {
 
     const paidAtIso = new Date(`${paidOn}T00:00:00.000Z`).toISOString();
 
-    let payload: any = {
+    let paymentPayload: any = {
       user_id: userId,
       card_id: cardId,
       amount: amt,
@@ -77,18 +82,14 @@ export default function AddPayment() {
       paid_at: paidAtIso,
     };
 
-    for (let attempt = 0; attempt < 6; attempt++) {
-      const { error } = await supabase.from("payments").insert(payload);
+    for (let i = 0; i < 10; i++) {
+      const { error } = await supabase.from("payments").insert(paymentPayload);
 
-      if (!error) {
-        setBusy(false);
-        nav(`/cards/${cardId}/statement`);
-        return;
-      }
+      if (!error) break;
 
       const missing = extractMissingColumn(error);
-      if (missing && missing in payload) {
-        delete payload[missing];
+      if (missing && missing in paymentPayload) {
+        delete paymentPayload[missing];
         continue;
       }
 
@@ -97,15 +98,33 @@ export default function AddPayment() {
       return;
     }
 
+    if (withdraw) {
+      const fundPayload = {
+        user_id: userId,
+        event_date: paidOn,
+        event_type: "withdraw",
+        amount: amt,
+        note: "Card payment",
+      };
+
+      const { error: feErr } = await supabase.from("plan_fund_events").insert(fundPayload);
+      if (feErr) {
+        setBusy(false);
+        alert(`Payment saved, but Fund withdraw failed: ${feErr.message}`);
+        nav(`/cards/${cardId}/statement`);
+        return;
+      }
+    }
+
     setBusy(false);
-    alert("Could not save payment. Ensure payments has paid_on and/or paid_at, then reload PostgREST schema.");
+    nav(`/cards/${cardId}/statement`);
   };
 
   return (
     <div className="p-4 text-white space-y-3">
       <div>
         <div className="text-2xl font-semibold tracking-tight">Add payment</div>
-        <div className="mt-1 text-sm text-white/60">This will be counted toward the statement window</div>
+        <div className="mt-1 text-sm text-white/60">Optionally withdraw from Plan Fund</div>
       </div>
 
       <Card className="p-5 space-y-4">
@@ -128,6 +147,21 @@ export default function AddPayment() {
           <div>
             <div className="text-xs text-white/60">Date</div>
             <Input value={paidOn} onChange={(e) => setPaidOn(e.target.value)} type="date" className="mt-2" />
+          </div>
+        </div>
+
+        <div className="rounded-3xl bg-black/30 border border-white/10 p-4">
+          <div className="text-sm">Withdraw from Fund?</div>
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <Button variant={withdraw ? "primary" : "secondary"} onClick={() => setWithdraw(true)} type="button">
+              Yes
+            </Button>
+            <Button variant={!withdraw ? "primary" : "secondary"} onClick={() => setWithdraw(false)} type="button">
+              No
+            </Button>
+          </div>
+          <div className="mt-2 text-xs text-white/60">
+            If Yes, the same amount is recorded as a Fund withdrawal.
           </div>
         </div>
 

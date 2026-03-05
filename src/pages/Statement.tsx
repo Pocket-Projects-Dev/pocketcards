@@ -294,6 +294,8 @@ export default function Statement() {
     };
   }, [computed, spends, installments, payments]);
 
+  const payRemaining = totals ? Math.ceil(Number(totals.remaining || 0)) : 0;
+
   if (loading) return <div className="p-4 text-sm text-white/70">Loading statement…</div>;
 
   return (
@@ -307,7 +309,15 @@ export default function Statement() {
 
       <div className="flex gap-2">
         <Link to={`/add/spend?card=${card?.id ?? ""}`} className="flex-1"><Button className="w-full">Add spend</Button></Link>
-        <Link to={`/add/payment?card=${card?.id ?? ""}`} className="flex-1"><Button className="w-full">Add payment</Button></Link>
+            {payRemaining > 0 ? (
+    <Link to={`/add/payment?card=${card?.id ?? ""}&amount=${payRemaining}&withdraw=1`} className="flex-1">
+    <Button className="w-full">Pay remaining</Button>
+    </Link>
+    ) : (
+  <div className="flex-1">
+    <Button className="w-full" disabled>Paid</Button>
+  </div>
+    )}
         <Link to={`/add/emi?card=${card?.id ?? ""}`} className="flex-1"><Button className="w-full">Convert EMI</Button></Link>
       </div>
 
