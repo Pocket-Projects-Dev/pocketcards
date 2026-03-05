@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
-import { Card, ProgressBar, Button } from "../components/ui";
+import { Card, ProgressBar, Button, Skeleton } from "../components/ui";
 import { formatINR } from "../lib/format";
 
 type CardRow = {
@@ -18,6 +18,34 @@ type SummaryRow = {
   due_date: string;
   days_to_due: number;
 };
+
+function CardsSkeleton() {
+  return (
+    <div className="p-4 text-white space-y-3">
+      <div className="flex items-end justify-between">
+        <div className="space-y-2 w-full">
+          <Skeleton className="h-7 w-32" />
+          <Skeleton className="h-4 w-56" />
+        </div>
+        <Skeleton className="h-10 w-24" />
+      </div>
+
+      {[0, 1, 2].map((i) => (
+        <Card key={i} className="p-5 space-y-4">
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-2 w-full">
+              <Skeleton className="h-5 w-3/4" />
+              <Skeleton className="h-4 w-1/2" />
+            </div>
+            <Skeleton className="h-9 w-14" />
+          </div>
+          <Skeleton className="h-2 w-full rounded-full" />
+          <Skeleton className="h-4 w-2/3" />
+        </Card>
+      ))}
+    </div>
+  );
+}
 
 export default function Cards() {
   const nav = useNavigate();
@@ -75,7 +103,7 @@ export default function Cards() {
     return m;
   }, [summary]);
 
-  if (loading) return <div className="p-4 text-sm text-white/70">Loading…</div>;
+  if (loading) return <CardsSkeleton />;
 
   return (
     <div className="p-4 text-white space-y-3">
@@ -92,7 +120,16 @@ export default function Cards() {
       {err ? <Card className="p-4 text-sm text-red-300">{err}</Card> : null}
 
       {cards.length === 0 ? (
-        <Card className="p-5 text-sm text-white/70">No cards yet.</Card>
+        <Card className="p-5 space-y-3">
+          <div className="text-lg font-semibold">Add your first card</div>
+          <div className="text-sm text-white/60">
+            Then open its statement, add spends, and record payments anytime until the due date.
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Link to="/cards/new"><Button className="w-full" variant="primary">Add card</Button></Link>
+            <Link to="/"><Button className="w-full">Go to dashboard</Button></Link>
+          </div>
+        </Card>
       ) : (
         <div className="space-y-3">
           {cards.map((c) => {

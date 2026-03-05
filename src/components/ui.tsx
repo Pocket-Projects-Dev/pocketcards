@@ -111,3 +111,7 @@ export function Badge(props: { children: any; tone?: "neutral" | "danger" | "goo
     </span>
   );
 }
+
+export function Skeleton(props: { className?: string }) {
+  return <div className={cx("animate-pulse rounded-2xl bg-white/10", props.className)} />;
+}

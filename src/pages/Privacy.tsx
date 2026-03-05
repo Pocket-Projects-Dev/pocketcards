@@ -83,10 +83,6 @@ export default function Privacy() {
             Email: support@pocketprojects.in
           </div>
         </Card>
-
-        <div className="text-xs text-white/50">
-          Review and adjust this policy to match your exact business and compliance needs.
-        </div>
       </div>
     </div>
   );

@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { supabase } from "../lib/supabase";
-import { Badge, Button, Card, Input, ProgressBar, cx } from "../components/ui";
+import { Badge, Button, Card, Input, ProgressBar, Skeleton, cx } from "../components/ui";
 import { formatDateShort, formatINR } from "../lib/format";
+import { cacheGet, cacheSet } from "../lib/cache";
 
 type CardRow = {
   id: string;
@@ -38,6 +39,14 @@ type PayRow = {
   paid_on: string | null;
   paid_at: string | null;
   created_at: string;
+};
+
+type StatementCache = {
+  spends: SpendRow[];
+  payments: PayRow[];
+  installments: InstRow[];
+  plansThisMonth: PlanRow[];
+  fetchedAt: string;
 };
 
 function extractMissingColumn(err: any) {
@@ -98,6 +107,42 @@ type TLItem = {
   amount: number;
 };
 
+function StatementSkeleton() {
+  return (
+    <div className="p-4 text-white space-y-3">
+      <div className="flex items-end justify-between gap-3">
+        <div className="min-w-0 w-full">
+          <Skeleton className="h-7 w-3/4" />
+          <Skeleton className="mt-2 h-4 w-full" />
+        </div>
+        <Skeleton className="h-7 w-20 rounded-full" />
+      </div>
+
+      <Card className="p-5 space-y-3">
+        <Skeleton className="h-4 w-28" />
+        <Skeleton className="h-11 w-full" />
+      </Card>
+
+      <Card className="p-5 space-y-3">
+        <Skeleton className="h-4 w-24" />
+        <Skeleton className="h-9 w-40" />
+        <Skeleton className="h-2 w-full rounded-full" />
+        <div className="grid grid-cols-3 gap-2">
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-10 w-full" />
+          <Skeleton className="h-10 w-full" />
+        </div>
+      </Card>
+
+      <Card className="p-5 space-y-2">
+        <Skeleton className="h-4 w-20" />
+        <Skeleton className="h-16 w-full" />
+        <Skeleton className="h-16 w-full" />
+      </Card>
+    </div>
+  );
+}
+
 export default function Statement() {
   const { cardId } = useParams();
   const id = cardId ?? "";
@@ -116,7 +161,11 @@ export default function Statement() {
   const [payments, setPayments] = useState<PayRow[]>([]);
 
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  const cardKey = useMemo(() => `card:${id}`, [id]);
+  const stmtKey = useMemo(() => `stmt:${id}:${month}`, [id, month]);
 
   useEffect(() => {
     if (qsMonth && qsMonth !== month) setMonth(qsMonth);
@@ -141,17 +190,32 @@ export default function Statement() {
     const dueDate = makeDate(dueY, dueM, card.due_day);
 
     const payStart = cycleStart;
-
     return { cycleStart, cycleEnd, dueDate, payStart };
   }, [card, month]);
 
   useEffect(() => {
     if (!id) return;
+
+    const cachedCard = cacheGet<CardRow>(cardKey);
+    if (cachedCard) setCard(cachedCard);
+
+    const cachedStmt = cacheGet<StatementCache>(stmtKey);
+    if (cachedStmt) {
+      setSpends(cachedStmt.spends);
+      setPayments(cachedStmt.payments);
+      setInstallments(cachedStmt.installments);
+      setPlansThisMonth(cachedStmt.plansThisMonth);
+      setLoading(false);
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
+
     let alive = true;
 
     (async () => {
-      setLoading(true);
       setErr(null);
+      setRefreshing(true);
 
       const { data: c, error: ce } = await supabase
         .from("cards")
@@ -160,29 +224,30 @@ export default function Statement() {
         .single();
 
       if (!alive) return;
+
       if (ce) {
         setErr(ce.message);
+        setRefreshing(false);
         setLoading(false);
         return;
       }
 
-      setCard((c as unknown) as CardRow);
-      setLoading(false);
-    })();
+      const cardRow = c as unknown as CardRow;
+      setCard(cardRow);
+      cacheSet(cardKey, cardRow, 10 * 60 * 1000);
 
-    return () => {
-      alive = false;
-    };
-  }, [id]);
+      const [yy, mm] = month.split("-").map(Number);
+      const closeDate = makeDate(yy, mm, cardRow.close_day);
+      const prevY = mm === 1 ? yy - 1 : yy;
+      const prevM = mm === 1 ? 12 : mm - 1;
+      const prevClose = makeDate(prevY, prevM, cardRow.close_day);
+      const cycleStart = addDays(prevClose, 1);
+      const cycleEnd = closeDate;
 
-  useEffect(() => {
-    if (!card || !computed) return;
-    let alive = true;
-
-    (async () => {
-      setErr(null);
-
-      const { cycleStart, cycleEnd, dueDate } = computed;
+      const dueSameMonth = cardRow.due_day > cardRow.close_day;
+      const dueY = dueSameMonth ? yy : mm === 12 ? yy + 1 : yy;
+      const dueM = dueSameMonth ? mm : mm === 12 ? 1 : mm + 1;
+      const dueDate = makeDate(dueY, dueM, cardRow.due_day);
 
       const dateFields = ["txn_date", "spent_on", "spent_at", "transaction_date", "date", "created_at"];
       let txRows: any[] = [];
@@ -192,7 +257,7 @@ export default function Statement() {
         const { data, error } = await supabase
           .from("transactions")
           .select("*")
-          .eq("card_id", card.id)
+          .eq("card_id", cardRow.id)
           .eq("is_emi", false)
           .gte(f, cycleStart)
           .lte(f, cycleEnd)
@@ -210,34 +275,35 @@ export default function Statement() {
         if (missing === f) continue;
 
         setErr(error.message);
+        setRefreshing(false);
+        setLoading(false);
         return;
       }
 
-      setSpends(
-        txRows.map((r) => ({
-          id: String(r.id),
-          date: usedField ? isoDate(r[usedField]) : isoDate(r.created_at),
-          amount: Number(r.amount || 0),
-          note: r.note ? String(r.note) : null,
-        }))
-      );
+      const spendsNext: SpendRow[] = txRows.map((r) => ({
+        id: String(r.id),
+        date: usedField ? isoDate(r[usedField]) : isoDate(r.created_at),
+        amount: Number(r.amount || 0),
+        note: r.note ? String(r.note) : null,
+      }));
 
       const { data: allPlans, error: ape } = await supabase
         .from("emi_plans")
         .select("id")
-        .eq("card_id", card.id);
+        .eq("card_id", cardRow.id);
 
       if (!alive) return;
       if (ape) {
         setErr(ape.message);
+        setRefreshing(false);
+        setLoading(false);
         return;
       }
 
       const planIds = ((((allPlans as unknown) as any[]) ?? []) as any[]).map((x) => String(x.id));
 
-      if (planIds.length === 0) {
-        setInstallments([]);
-      } else {
+      let installmentsNext: InstRow[] = [];
+      if (planIds.length > 0) {
         const { data: ins, error: ie } = await supabase
           .from("emi_installments")
           .select("id,emi_plan_id,due_date,amount,paid_at")
@@ -247,47 +313,48 @@ export default function Statement() {
         if (!alive) return;
         if (ie) {
           setErr(ie.message);
+          setRefreshing(false);
+          setLoading(false);
           return;
         }
 
-        setInstallments(
-          ((((ins as unknown) as any[]) ?? []) as any[]).map((r) => ({
-            id: String(r.id),
-            emi_plan_id: String(r.emi_plan_id),
-            due_date: String(r.due_date),
-            amount: Number(r.amount || 0),
-            paid_at: r.paid_at ? String(r.paid_at) : null,
-          }))
-        );
+        installmentsNext = ((((ins as unknown) as any[]) ?? []) as any[]).map((r) => ({
+          id: String(r.id),
+          emi_plan_id: String(r.emi_plan_id),
+          due_date: String(r.due_date),
+          amount: Number(r.amount || 0),
+          paid_at: r.paid_at ? String(r.paid_at) : null,
+        }));
       }
 
       const { data: pay, error: pae } = await supabase
         .from("payments")
         .select("*")
-        .eq("card_id", card.id)
+        .eq("card_id", cardRow.id)
         .order("created_at", { ascending: false })
         .limit(200);
 
       if (!alive) return;
       if (pae) {
         setErr(pae.message);
+        setRefreshing(false);
+        setLoading(false);
         return;
       }
 
-      setPayments(
-        ((((pay as unknown) as any[]) ?? []) as any[]).map((r) => ({
-          id: String(r.id),
-          amount: Number(r.amount || 0),
-          paid_on: r.paid_on ? String(r.paid_on) : null,
-          paid_at: r.paid_at ? String(r.paid_at) : null,
-          created_at: String(r.created_at),
-        }))
-      );
+      const paymentsNext: PayRow[] = ((((pay as unknown) as any[]) ?? []) as any[]).map((r) => ({
+        id: String(r.id),
+        amount: Number(r.amount || 0),
+        paid_on: r.paid_on ? String(r.paid_on) : null,
+        paid_at: r.paid_at ? String(r.paid_at) : null,
+        created_at: String(r.created_at),
+      }));
 
+      let plansNext: PlanRow[] = [];
       const { data: p, error: pe } = await supabase
         .from("emi_plans")
         .select("id,principal,monthly_emi,purchase_date,statement_month")
-        .eq("card_id", card.id)
+        .eq("card_id", cardRow.id)
         .eq("statement_month", month)
         .order("created_at", { ascending: false });
 
@@ -295,29 +362,47 @@ export default function Statement() {
 
       if (pe) {
         const missing = extractMissingColumn(pe);
-        if (missing === "statement_month" || missing === "purchase_date") {
-          setPlansThisMonth([]);
-        } else {
+        if (missing !== "statement_month" && missing !== "purchase_date") {
           setErr(pe.message);
+          setRefreshing(false);
+          setLoading(false);
           return;
         }
       } else {
-        setPlansThisMonth(
-          ((((p as unknown) as any[]) ?? []) as any[]).map((r) => ({
-            id: String(r.id),
-            principal: Number(r.principal || 0),
-            monthly_emi: Number(r.monthly_emi || 0),
-            purchase_date: r.purchase_date ? String(r.purchase_date) : null,
-            statement_month: r.statement_month ? String(r.statement_month) : null,
-          }))
-        );
+        plansNext = ((((p as unknown) as any[]) ?? []) as any[]).map((r) => ({
+          id: String(r.id),
+          principal: Number(r.principal || 0),
+          monthly_emi: Number(r.monthly_emi || 0),
+          purchase_date: r.purchase_date ? String(r.purchase_date) : null,
+          statement_month: r.statement_month ? String(r.statement_month) : null,
+        }));
       }
+
+      setSpends(spendsNext);
+      setInstallments(installmentsNext);
+      setPayments(paymentsNext);
+      setPlansThisMonth(plansNext);
+
+      cacheSet(
+        stmtKey,
+        {
+          spends: spendsNext,
+          payments: paymentsNext,
+          installments: installmentsNext,
+          plansThisMonth: plansNext,
+          fetchedAt: new Date().toISOString(),
+        },
+        2 * 60 * 1000
+      );
+
+      setRefreshing(false);
+      setLoading(false);
     })();
 
     return () => {
       alive = false;
     };
-  }, [card, computed, month]);
+  }, [id, month, cardKey, stmtKey]);
 
   const totals = useMemo(() => {
     if (!computed) return null;
@@ -398,7 +483,7 @@ export default function Statement() {
     return items;
   }, [computed, spends, payments, installments, plansThisMonth]);
 
-  if (loading) return <div className="p-4 text-sm text-white/70">Loading statement…</div>;
+  if (loading && !card) return <StatementSkeleton />;
 
   const onMonthChange = (m: string) => {
     setMonth(m);
@@ -415,6 +500,7 @@ export default function Statement() {
           {computed ? (
             <div className="mt-1 text-sm text-white/60">
               Cycle {computed.cycleStart} → {computed.cycleEnd} • Due {formatDateShort(computed.dueDate)}
+              {refreshing ? <span className="ml-2 text-white/40">Refreshing…</span> : null}
             </div>
           ) : null}
         </div>
@@ -466,9 +552,11 @@ export default function Statement() {
             </Link>
           </div>
 
-          <div className="text-xs text-white/50">
-            Payments count if recorded between {computed?.payStart} and {computed?.dueDate}.
-          </div>
+          {computed ? (
+            <div className="text-xs text-white/50">
+              Payments count if recorded between {computed.payStart} and {computed.dueDate}.
+            </div>
+          ) : null}
         </Card>
       ) : null}
 
@@ -476,7 +564,23 @@ export default function Statement() {
         <div className="text-sm text-white/70">Timeline</div>
 
         {timeline.length === 0 ? (
-          <div className="mt-3 text-sm text-white/70">No activity for this statement yet.</div>
+          <div className="mt-3 space-y-3">
+            <div className="text-sm text-white/70">Start your statement</div>
+            <div className="text-sm text-white/60">
+              Add spends as they happen, then record payments anytime during the cycle until the due date.
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <Link to={`/add/spend?card=${card?.id ?? ""}&m=${month}`}>
+                <Button className="w-full" size="sm">Add spend</Button>
+              </Link>
+              <Link to={`/add/payment?card=${card?.id ?? ""}&m=${month}`}>
+                <Button className="w-full" size="sm" variant="primary">Add payment</Button>
+              </Link>
+              <Link to={`/add/emi?card=${card?.id ?? ""}&m=${month}`}>
+                <Button className="w-full" size="sm">Convert EMI</Button>
+              </Link>
+            </div>
+          </div>
         ) : (
           <div className="mt-4 space-y-2">
             {timeline.map((t) => {
@@ -490,9 +594,9 @@ export default function Statement() {
                   : <Badge>Conversion</Badge>;
 
               const amtTone =
-                t.kind === "payment" ? "text-emerald-200" : t.kind === "spend" || t.kind === "emi_due" ? "text-white" : "text-white";
+                t.kind === "payment" ? "text-emerald-200" : "text-white";
 
-              const sign = t.kind === "payment" ? "-" : "+";
+              const prefix = t.kind === "payment" ? "-" : "";
 
               return (
                 <div key={t.id} className="rounded-3xl bg-black/30 border border-white/10 p-4">
@@ -507,7 +611,7 @@ export default function Statement() {
                     </div>
 
                     <div className={cx("text-right text-sm font-semibold", amtTone)}>
-                      {t.kind === "payment" ? sign : ""}{formatINR(t.amount)}
+                      {prefix}{formatINR(t.amount)}
                     </div>
                   </div>
                 </div>
