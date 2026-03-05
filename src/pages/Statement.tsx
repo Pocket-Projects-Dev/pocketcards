@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { supabase } from "../lib/supabase";
-import { Card, Input, Button } from "../components/ui";
+import { Button, Card, Input, ProgressBar } from "../components/ui";
 import { formatINR } from "../lib/format";
 
 type CardRow = {
@@ -16,11 +16,29 @@ type CardRow = {
 
 type SpendRow = { id: string; date: string; amount: number; note: string | null };
 
-type PlanRow = { id: string; principal: number; monthly_emi: number; purchase_date: string | null; statement_month: string | null };
+type PlanRow = {
+  id: string;
+  principal: number;
+  monthly_emi: number;
+  purchase_date: string | null;
+  statement_month: string | null;
+};
 
-type InstRow = { id: string; emi_plan_id: string; due_date: string; amount: number; paid_at: string | null };
+type InstRow = {
+  id: string;
+  emi_plan_id: string;
+  due_date: string;
+  amount: number;
+  paid_at: string | null;
+};
 
-type PayRow = { id: string; amount: number; paid_on: string | null; paid_at: string | null; created_at: string };
+type PayRow = {
+  id: string;
+  amount: number;
+  paid_on: string | null;
+  paid_at: string | null;
+  created_at: string;
+};
 
 function extractMissingColumn(err: any) {
   const msg = String(err?.message || "");
@@ -33,8 +51,12 @@ function extractMissingColumn(err: any) {
   return null;
 }
 
-function pad2(n: number) { return String(n).padStart(2, "0"); }
-function daysInMonth(y: number, m: number) { return new Date(Date.UTC(y, m, 0)).getUTCDate(); }
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
+}
+function daysInMonth(y: number, m: number) {
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
 function makeDate(y: number, m: number, d: number) {
   const last = daysInMonth(y, m);
   const dd = Math.min(d, last);
@@ -64,7 +86,12 @@ export default function Statement() {
   const { cardId } = useParams();
   const id = cardId ?? "";
 
-  const [month, setMonth] = useState(ymNow());
+  const location = useLocation();
+  const nav = useNavigate();
+  const qs = useMemo(() => new URLSearchParams(location.search), [location.search]);
+  const qsMonth = qs.get("m") || "";
+
+  const [month, setMonth] = useState(qsMonth || ymNow());
   const [card, setCard] = useState<CardRow | null>(null);
 
   const [spends, setSpends] = useState<SpendRow[]>([]);
@@ -74,6 +101,10 @@ export default function Statement() {
 
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (qsMonth && qsMonth !== month) setMonth(qsMonth);
+  }, [qsMonth]);
 
   const computed = useMemo(() => {
     if (!card) return null;
@@ -93,7 +124,8 @@ export default function Statement() {
     const dueM = dueSameMonth ? mm : (mm === 12 ? 1 : mm + 1);
     const dueDate = makeDate(dueY, dueM, card.due_day);
 
-    const payStart = addDays(cycleEnd, 0);
+    // IMPORTANT FIX: payments count from cycleStart (not cycleEnd)
+    const payStart = cycleStart;
 
     return { cycleStart, cycleEnd, dueDate, payStart };
   }, [card, month]);
@@ -123,7 +155,9 @@ export default function Statement() {
       setLoading(false);
     })();
 
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+    };
   }, [id]);
 
   useEffect(() => {
@@ -135,6 +169,7 @@ export default function Statement() {
 
       const { cycleStart, cycleEnd, dueDate } = computed;
 
+      // Spends (non-EMI), using whatever date column your schema supports
       const dateFields = ["txn_date", "spent_on", "spent_at", "transaction_date", "date", "created_at"];
       let txRows: any[] = [];
       let usedField: string | null = null;
@@ -173,6 +208,7 @@ export default function Statement() {
         }))
       );
 
+      // Get all EMI plan IDs for card
       const { data: allPlans, error: ape } = await supabase
         .from("emi_plans")
         .select("id")
@@ -186,6 +222,7 @@ export default function Statement() {
 
       const planIds = ((((allPlans as unknown) as any[]) ?? []) as any[]).map((x) => String(x.id));
 
+      // Installments billed on this statement due date
       if (planIds.length === 0) {
         setInstallments([]);
       } else {
@@ -212,6 +249,7 @@ export default function Statement() {
         );
       }
 
+      // Payments for card (we filter into statement window in totals)
       const { data: pay, error: pae } = await supabase
         .from("payments")
         .select("*")
@@ -235,6 +273,7 @@ export default function Statement() {
         }))
       );
 
+      // EMI conversions tagged to this statement month (optional)
       const { data: p, error: pe } = await supabase
         .from("emi_plans")
         .select("id,principal,monthly_emi,purchase_date,statement_month")
@@ -265,7 +304,9 @@ export default function Statement() {
       }
     })();
 
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+    };
   }, [card, computed, month]);
 
   const totals = useMemo(() => {
@@ -275,7 +316,7 @@ export default function Statement() {
     const emiTotal = installments.reduce((s, x) => s + Number(x.amount || 0), 0);
     const totalDue = spendTotal + emiTotal;
 
-    const payStart = computed.payStart;
+    const payStart = computed.payStart; // now cycleStart
     const dueDate = computed.dueDate;
 
     const paidTotal = payments
@@ -285,18 +326,20 @@ export default function Statement() {
       })
       .reduce((s, p) => s + Number(p.amount || 0), 0);
 
-    return {
-      spendTotal,
-      emiTotal,
-      totalDue,
-      paidTotal,
-      remaining: Math.max(0, totalDue - paidTotal),
-    };
+    const remaining = Math.max(0, totalDue - paidTotal);
+
+    return { spendTotal, emiTotal, totalDue, paidTotal, remaining };
   }, [computed, spends, installments, payments]);
 
   const payRemaining = totals ? Math.ceil(Number(totals.remaining || 0)) : 0;
+  const paidProgress = totals && totals.totalDue > 0 ? Math.max(0, Math.min(1, totals.paidTotal / totals.totalDue)) : 0;
 
   if (loading) return <div className="p-4 text-sm text-white/70">Loading statement…</div>;
+
+  const onMonthChange = (m: string) => {
+    setMonth(m);
+    nav({ pathname: location.pathname, search: `?m=${encodeURIComponent(m)}` }, { replace: true });
+  };
 
   return (
     <div className="p-4 text-white space-y-3">
@@ -308,24 +351,33 @@ export default function Statement() {
       </div>
 
       <div className="flex gap-2">
-        <Link to={`/add/spend?card=${card?.id ?? ""}`} className="flex-1"><Button className="w-full">Add spend</Button></Link>
-            {payRemaining > 0 ? (
-    <Link to={`/add/payment?card=${card?.id ?? ""}&amount=${payRemaining}&withdraw=1`} className="flex-1">
-    <Button className="w-full">Pay remaining</Button>
-    </Link>
-    ) : (
-  <div className="flex-1">
-    <Button className="w-full" disabled>Paid</Button>
-  </div>
-    )}
-        <Link to={`/add/emi?card=${card?.id ?? ""}`} className="flex-1"><Button className="w-full">Convert EMI</Button></Link>
+        <Link to={`/add/spend?card=${card?.id ?? ""}&m=${month}`} className="flex-1">
+          <Button className="w-full">Add spend</Button>
+        </Link>
+
+        {payRemaining > 0 ? (
+          <Link
+            to={`/add/payment?card=${card?.id ?? ""}&m=${month}&amount=${payRemaining}&max=${payRemaining}&withdraw=1`}
+            className="flex-1"
+          >
+            <Button className="w-full">Pay remaining</Button>
+          </Link>
+        ) : (
+          <div className="flex-1">
+            <Button className="w-full" disabled>Paid</Button>
+          </div>
+        )}
+
+        <Link to={`/add/emi?card=${card?.id ?? ""}&m=${month}`} className="flex-1">
+          <Button className="w-full">Convert EMI</Button>
+        </Link>
       </div>
 
       {err ? <Card className="p-4 text-sm text-red-300">{err}</Card> : null}
 
       <Card className="p-5 space-y-3">
         <div className="text-xs text-white/60">Statement month</div>
-        <Input type="month" value={month} onChange={(e) => setMonth(e.target.value)} />
+        <Input type="month" value={month} onChange={(e) => onMonthChange(e.target.value)} />
         {computed ? (
           <div className="text-xs text-white/60">
             Cycle {computed.cycleStart} → {computed.cycleEnd} • Due {computed.dueDate}
@@ -334,20 +386,32 @@ export default function Statement() {
       </Card>
 
       {totals ? (
-        <div className="grid grid-cols-2 gap-3">
-          <Card className="p-5">
-            <div className="text-xs text-white/60">Total due</div>
-            <div className="mt-2 text-2xl font-semibold">{formatINR(totals.totalDue)}</div>
-            <div className="mt-2 text-xs text-white/60">
-              Spends {formatINR(totals.spendTotal)} • EMI {formatINR(totals.emiTotal)}
+        <Card className="p-5 space-y-3">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="text-xs text-white/60">Total due</div>
+              <div className="mt-2 text-2xl font-semibold">{formatINR(totals.totalDue)}</div>
+              <div className="mt-2 text-xs text-white/60">
+                Spends {formatINR(totals.spendTotal)} • EMI {formatINR(totals.emiTotal)}
+              </div>
             </div>
-          </Card>
-          <Card className="p-5">
-            <div className="text-xs text-white/60">Paid / Remaining</div>
-            <div className="mt-2 text-2xl font-semibold">{formatINR(totals.remaining)}</div>
-            <div className="mt-2 text-xs text-white/60">Paid {formatINR(totals.paidTotal)}</div>
-          </Card>
-        </div>
+            <div className="text-right">
+              <div className="text-xs text-white/60">Remaining</div>
+              <div className="mt-2 text-2xl font-semibold">{formatINR(totals.remaining)}</div>
+              <div className="mt-2 text-xs text-white/60">Paid {formatINR(totals.paidTotal)}</div>
+            </div>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between text-xs text-white/60">
+              <span>Paid progress</span>
+              <span>{formatINR(totals.paidTotal)} / {formatINR(totals.totalDue)}</span>
+            </div>
+            <div className="mt-2">
+              <ProgressBar value={paidProgress} />
+            </div>
+          </div>
+        </Card>
       ) : null}
 
       <Card className="p-5">
@@ -389,6 +453,37 @@ export default function Statement() {
       </Card>
 
       <Card className="p-5">
+        <div className="text-sm text-white/70">Payments counted for this statement</div>
+        {computed ? (
+          <div className="mt-2 text-xs text-white/60">
+            Counted if payment date is between {computed.payStart} and {computed.dueDate}.
+          </div>
+        ) : null}
+
+        {computed && payments.filter((p) => {
+          const d = dateFromPayment(p);
+          return d >= computed.payStart && d <= computed.dueDate;
+        }).length === 0 ? (
+          <div className="mt-3 text-sm text-white/70">No payments in this statement window.</div>
+        ) : computed ? (
+          <div className="mt-4 space-y-2">
+            {payments
+              .filter((p) => {
+                const d = dateFromPayment(p);
+                return d >= computed.payStart && d <= computed.dueDate;
+              })
+              .slice(0, 30)
+              .map((p) => (
+                <div key={p.id} className="rounded-3xl bg-black/30 border border-white/10 p-4 flex items-start justify-between gap-4">
+                  <div className="text-sm">{dateFromPayment(p)}</div>
+                  <div className="text-sm font-semibold">{formatINR(p.amount)}</div>
+                </div>
+              ))}
+          </div>
+        ) : null}
+      </Card>
+
+      <Card className="p-5">
         <div className="text-sm text-white/70">EMI conversions tagged to this statement (informational)</div>
         {plansThisMonth.length === 0 ? (
           <div className="mt-3 text-sm text-white/70">No EMI conversions tagged to this month.</div>
@@ -407,31 +502,6 @@ export default function Statement() {
             ))}
           </div>
         )}
-      </Card>
-
-      <Card className="p-5">
-        <div className="text-sm text-white/70">Payments counted for this statement window</div>
-        {computed && payments.filter((p) => {
-          const d = dateFromPayment(p);
-          return d >= computed.payStart && d <= computed.dueDate;
-        }).length === 0 ? (
-          <div className="mt-3 text-sm text-white/70">No payments in this statement window.</div>
-        ) : computed ? (
-          <div className="mt-4 space-y-2">
-            {payments
-              .filter((p) => {
-                const d = dateFromPayment(p);
-                return d >= computed.payStart && d <= computed.dueDate;
-              })
-              .slice(0, 20)
-              .map((p) => (
-                <div key={p.id} className="rounded-3xl bg-black/30 border border-white/10 p-4 flex items-start justify-between gap-4">
-                  <div className="text-sm">{dateFromPayment(p)}</div>
-                  <div className="text-sm font-semibold">{formatINR(p.amount)}</div>
-                </div>
-              ))}
-          </div>
-        ) : null}
       </Card>
     </div>
   );

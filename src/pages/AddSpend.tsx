@@ -28,8 +28,10 @@ export default function AddSpend() {
 
   const nav = useNavigate();
   const location = useLocation();
+  const qs = useMemo(() => new URLSearchParams(location.search), [location.search]);
 
-  const preCardId = useMemo(() => new URLSearchParams(location.search).get("card") ?? "", [location.search]);
+  const preCardId = qs.get("card") ?? "";
+  const statementMonth = qs.get("m") ?? "";
 
   const [cards, setCards] = useState<CardRow[]>([]);
   const [cardId, setCardId] = useState("");
@@ -69,12 +71,38 @@ export default function AddSpend() {
     const amt = Number(amount || 0);
     if (!(amt > 0)) return;
 
+    // Credit limit validation (simple): don’t allow spend beyond available limit
+    const { data: cardMeta, error: ce } = await supabase
+      .from("cards")
+      .select("credit_limit")
+      .eq("id", cardId)
+      .single();
+
+    if (!ce && cardMeta) {
+      const limit = Number((cardMeta as any).credit_limit || 0) || 0;
+      if (limit > 0) {
+        const { data: s, error: se } = await supabase
+          .from("card_cycle_summary")
+          .select("remaining_due")
+          .eq("card_id", cardId)
+          .maybeSingle();
+
+        if (!se && s) {
+          const used = Number((s as any).remaining_due || 0) || 0;
+          const left = limit - used;
+          if (amt > left) {
+            alert(`This spend exceeds available limit. Left: ${left}`);
+            return;
+          }
+        }
+      }
+    }
+
     setBusy(true);
 
     const isoAt = new Date(`${date}T00:00:00.000Z`).toISOString();
     const noteVal = note.trim();
 
-    // Provide ALL likely date fields (including required txn_date). Missing fields will be dropped.
     let payload: any = {
       user_id: userId,
       card_id: cardId,
@@ -82,7 +110,8 @@ export default function AddSpend() {
       is_emi: false,
       emi_plan_id: null,
 
-      txn_date: date,           // required in your schema
+      // your schema requires txn_date
+      txn_date: date,
       spent_on: date,
       transaction_date: date,
       date: date,
@@ -93,13 +122,12 @@ export default function AddSpend() {
 
     if (noteVal) payload.note = noteVal;
 
-    // Retry loop: delete unknown columns; for not-null columns, set known value.
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 14; i++) {
       const { error } = await supabase.from("transactions").insert(payload);
 
       if (!error) {
         setBusy(false);
-        nav(`/cards/${cardId}/statement`);
+        nav(statementMonth ? `/cards/${cardId}/statement?m=${statementMonth}` : `/cards/${cardId}/statement`);
         return;
       }
 
@@ -110,12 +138,9 @@ export default function AddSpend() {
         continue;
       }
 
-      if (info.kind === "notnull" && info.column) {
-        if (info.column === "txn_date") {
-          payload.txn_date = date;
-          continue;
-        }
-        // If DB requires some other not-null column, we don't know what to set.
+      if (info.kind === "notnull" && info.column === "txn_date") {
+        payload.txn_date = date;
+        continue;
       }
 
       setBusy(false);
@@ -124,7 +149,7 @@ export default function AddSpend() {
     }
 
     setBusy(false);
-    alert("Could not save after retries. Schema has required fields we are not setting.");
+    alert("Could not save spend after retries.");
   };
 
   return (
