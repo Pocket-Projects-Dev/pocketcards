@@ -40,9 +40,16 @@ export default function Dashboard() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const signOut = async () => {
-    await supabase.auth.signOut();
-  };
+  const signOut = () => {
+  void (async () => {
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) alert(error.message);
+    } catch (e: any) {
+      alert(e?.message || "Sign out failed");
+    }
+  })();
+};
 
   useEffect(() => {
     let alive = true;

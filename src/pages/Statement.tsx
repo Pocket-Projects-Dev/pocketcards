@@ -135,7 +135,7 @@ export default function Statement() {
 
       const { cycleStart, cycleEnd, dueDate } = computed;
 
-      const dateFields = ["spent_on", "spent_at", "transaction_date", "date", "created_at"];
+      const dateFields = ["txn_date", "spent_on", "spent_at", "transaction_date", "date", "created_at"];
       let txRows: any[] = [];
       let usedField: string | null = null;
 

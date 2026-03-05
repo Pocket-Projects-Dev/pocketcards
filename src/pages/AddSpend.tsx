@@ -7,15 +7,19 @@ import { Button, Card, Input, Select } from "../components/ui";
 
 type CardRow = { id: string; name: string; last4: string | null };
 
-function extractMissingColumn(err: any) {
+function errorKind(err: any): { kind: "missing" | "notnull" | "other"; column: string | null; message: string } {
   const msg = String(err?.message || "");
-  const m1 = msg.match(/Could not find the '([^']+)' column/i);
-  if (m1) return m1[1];
-  const m2 = msg.match(/column [^\.]+\.(\w+) does not exist/i);
-  if (m2) return m2[1];
-  const m3 = msg.match(/column "([^"]+)" does not exist/i);
-  if (m3) return m3[1];
-  return null;
+
+  const mMissing1 = msg.match(/Could not find the '([^']+)' column/i);
+  if (mMissing1) return { kind: "missing", column: mMissing1[1], message: msg };
+
+  const mMissing2 = msg.match(/column [^\.]+\.(\w+) does not exist/i);
+  if (mMissing2) return { kind: "missing", column: mMissing2[1], message: msg };
+
+  const mNotNull = msg.match(/null value in column "([^"]+)".*violates not-null constraint/i);
+  if (mNotNull) return { kind: "notnull", column: mNotNull[1], message: msg };
+
+  return { kind: "other", column: null, message: msg };
 }
 
 export default function AddSpend() {
@@ -30,13 +34,12 @@ export default function AddSpend() {
   const [cards, setCards] = useState<CardRow[]>([]);
   const [cardId, setCardId] = useState("");
   const [amount, setAmount] = useState("");
-  const [spentOn, setSpentOn] = useState(todayISO());
+  const [date, setDate] = useState(todayISO());
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     let alive = true;
-
     (async () => {
       const { data, error } = await supabase
         .from("cards")
@@ -54,7 +57,6 @@ export default function AddSpend() {
         setCardId(match?.id ?? list[0]?.id ?? "");
       }
     })();
-
     return () => {
       alive = false;
     };
@@ -63,66 +65,73 @@ export default function AddSpend() {
   const save = async () => {
     if (!userId) return alert("Not signed in.");
     if (!cardId) return;
+
     const amt = Number(amount || 0);
     if (!(amt > 0)) return;
 
     setBusy(true);
 
-    const spentAtIso = new Date(`${spentOn}T00:00:00.000Z`).toISOString();
+    const isoAt = new Date(`${date}T00:00:00.000Z`).toISOString();
+    const noteVal = note.trim();
 
-    const base: any = {
+    // Provide ALL likely date fields (including required txn_date). Missing fields will be dropped.
+    let payload: any = {
       user_id: userId,
       card_id: cardId,
       amount: amt,
       is_emi: false,
       emi_plan_id: null,
+
+      txn_date: date,           // required in your schema
+      spent_on: date,
+      transaction_date: date,
+      date: date,
+
+      spent_at: isoAt,
+      txn_at: isoAt,
     };
 
-    const noteVal = note.trim();
+    if (noteVal) payload.note = noteVal;
 
-    const dateCandidates: Array<{ field: string; value: any }> = [
-      { field: "spent_on", value: spentOn },
-      { field: "spent_at", value: spentAtIso },
-      { field: "transaction_date", value: spentOn },
-      { field: "date", value: spentOn },
-    ];
+    // Retry loop: delete unknown columns; for not-null columns, set known value.
+    for (let i = 0; i < 12; i++) {
+      const { error } = await supabase.from("transactions").insert(payload);
 
-    for (const c of dateCandidates) {
-      let payload: any = { ...base, [c.field]: c.value };
-      if (noteVal) payload.note = noteVal;
-
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const { error } = await supabase.from("transactions").insert(payload);
-
-        if (!error) {
-          setBusy(false);
-          nav(`/cards/${cardId}/statement`);
-          return;
-        }
-
-        const missing = extractMissingColumn(error);
-
-        if (missing && missing in payload) {
-          if (missing === c.field) break; // try next date field
-          delete payload[missing]; // drop optional (like note) and retry
-          continue;
-        }
-
+      if (!error) {
         setBusy(false);
-        alert(error.message);
+        nav(`/cards/${cardId}/statement`);
         return;
       }
+
+      const info = errorKind(error);
+
+      if (info.kind === "missing" && info.column && info.column in payload) {
+        delete payload[info.column];
+        continue;
+      }
+
+      if (info.kind === "notnull" && info.column) {
+        if (info.column === "txn_date") {
+          payload.txn_date = date;
+          continue;
+        }
+        // If DB requires some other not-null column, we don't know what to set.
+      }
+
+      setBusy(false);
+      alert(info.message);
+      return;
     }
 
     setBusy(false);
-    alert("Could not save spend. Your transactions table is missing a usable date column. Run the SQL fix + reload schema.");
+    alert("Could not save after retries. Schema has required fields we are not setting.");
   };
 
   return (
     <div className="p-4 text-white space-y-3">
       <div>
         <div className="text-2xl font-semibold tracking-tight">Add spend</div>
-        <div className="mt-1 text-sm text-white/60">This will show up in the card’s statement cycle</div>
+        <div className="mt-1 text-sm text-white/60">Saved into the statement cycle</div>
       </div>
 
       <Card className="p-5 space-y-4">
@@ -144,7 +153,7 @@ export default function AddSpend() {
           </div>
           <div>
             <div className="text-xs text-white/60">Date</div>
-            <Input value={spentOn} onChange={(e) => setSpentOn(e.target.value)} type="date" className="mt-2" />
+            <Input value={date} onChange={(e) => setDate(e.target.value)} type="date" className="mt-2" />
           </div>
         </div>
 

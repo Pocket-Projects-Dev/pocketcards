@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+\import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { buildEmiSchedule } from "../lib/emi";
@@ -8,15 +8,19 @@ import { Button, Card, Input, Select } from "../components/ui";
 
 type CardRow = { id: string; name: string; last4: string | null };
 
-function extractMissingColumn(err: any) {
+function errorKind(err: any): { kind: "missing" | "notnull" | "other"; column: string | null; message: string } {
   const msg = String(err?.message || "");
-  const m1 = msg.match(/Could not find the '([^']+)' column/i);
-  if (m1) return m1[1];
-  const m2 = msg.match(/column [^\.]+\.(\w+) does not exist/i);
-  if (m2) return m2[1];
-  const m3 = msg.match(/column "([^"]+)" does not exist/i);
-  if (m3) return m3[1];
-  return null;
+
+  const mMissing1 = msg.match(/Could not find the '([^']+)' column/i);
+  if (mMissing1) return { kind: "missing", column: mMissing1[1], message: msg };
+
+  const mMissing2 = msg.match(/column [^\.]+\.(\w+) does not exist/i);
+  if (mMissing2) return { kind: "missing", column: mMissing2[1], message: msg };
+
+  const mNotNull = msg.match(/null value in column "([^"]+)".*violates not-null constraint/i);
+  if (mNotNull) return { kind: "notnull", column: mNotNull[1], message: msg };
+
+  return { kind: "other", column: null, message: msg };
 }
 
 export default function NewEmi() {
@@ -38,12 +42,7 @@ export default function NewEmi() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (statementMonth === todayISO().slice(0, 7)) setStatementMonth(purchaseDate.slice(0, 7));
-  }, [purchaseDate]);
-
-  useEffect(() => {
     let alive = true;
-
     (async () => {
       const { data, error } = await supabase
         .from("cards")
@@ -61,7 +60,6 @@ export default function NewEmi() {
         setCardId(match?.id ?? list[0]?.id ?? "");
       }
     })();
-
     return () => {
       alive = false;
     };
@@ -70,7 +68,6 @@ export default function NewEmi() {
   useEffect(() => {
     if (!cardId) return;
     let alive = true;
-
     (async () => {
       const { data, error } = await supabase
         .from("card_cycle_summary")
@@ -82,7 +79,6 @@ export default function NewEmi() {
       if (!alive) return;
       if (!error && data?.due_date) setFirstDueDate(String(data.due_date));
     })();
-
     return () => {
       alive = false;
     };
@@ -99,66 +95,6 @@ export default function NewEmi() {
     return null;
   }, [principal, annualRate, months, firstDueDate]);
 
-  const insertPlan = async (payload: any, tenureField: string, rateField: string) => {
-    let p = { ...payload };
-
-    for (let attempt = 0; attempt < 6; attempt++) {
-      const { data, error } = await supabase.from("emi_plans").insert(p).select("id").single();
-      if (!error && data?.id) return { id: String(data.id), payloadUsed: p };
-
-      const missing = extractMissingColumn(error);
-      if (missing && missing in p) {
-        if (missing === tenureField || missing === rateField) return { id: null, payloadUsed: null };
-        delete p[missing];
-        continue;
-      }
-
-      return { id: null, payloadUsed: null, fatal: error?.message || "Failed to create EMI plan" };
-    }
-
-    return { id: null, payloadUsed: null };
-  };
-
-  const insertEmiTransaction = async (planId: string, amountNum: number) => {
-    const purchaseAtIso = new Date(`${purchaseDate}T00:00:00.000Z`).toISOString();
-
-    const base: any = {
-      user_id: userId,
-      card_id: cardId,
-      amount: amountNum,
-      is_emi: true,
-      emi_plan_id: planId,
-      note: "EMI conversion",
-    };
-
-    const dateCandidates: Array<{ field: string; value: any }> = [
-      { field: "spent_on", value: purchaseDate },
-      { field: "spent_at", value: purchaseAtIso },
-      { field: "transaction_date", value: purchaseDate },
-      { field: "date", value: purchaseDate },
-    ];
-
-    for (const c of dateCandidates) {
-      let payload: any = { ...base, [c.field]: c.value };
-
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const { error } = await supabase.from("transactions").insert(payload);
-        if (!error) return null;
-
-        const missing = extractMissingColumn(error);
-        if (missing && missing in payload) {
-          if (missing === c.field) break;
-          delete payload[missing];
-          continue;
-        }
-
-        return error.message;
-      }
-    }
-
-    return "Could not insert EMI transaction into transactions. Run the SQL fix + reload schema.";
-  };
-
   const save = async () => {
     if (!userId) return alert("Not signed in.");
     if (!cardId) return;
@@ -172,50 +108,62 @@ export default function NewEmi() {
 
     const schedule = buildEmiSchedule({ principal: P, annualRate: r, months: m, firstDueDate });
 
-    const tenureFields = ["months", "tenure", "tenure_months"];
-    const rateFields = ["annual_rate", "rate", "interest_rate", "apr"];
-
-    const baseCommon: any = {
+    // Create emi_plans with broad compatibility fields. annual_interest_rate is required in your schema.
+    let planPayload: any = {
       user_id: userId,
       card_id: cardId,
       principal: P,
       first_due_date: firstDueDate,
+      purchase_date: purchaseDate,
+      statement_month: statementMonth,
+
       monthly_emi: schedule.monthlyEmi,
       total_payable: schedule.totalPayable,
       total_interest: schedule.totalInterest,
-      purchase_date: purchaseDate,
-      statement_month: statementMonth,
+
+      months: m,
+      tenure: m,
+      tenure_months: m,
+
+      annual_interest_rate: r,  // required in your schema
+      annual_rate: r,
+      rate: r,
+      interest_rate: r,
+      apr: r,
     };
 
     let planId: string | null = null;
-    let fatal: string | null = null;
 
-    for (const tf of tenureFields) {
-      for (const rf of rateFields) {
-        const payload = { ...baseCommon, [tf]: m, [rf]: r };
+    for (let i = 0; i < 16; i++) {
+      const { data, error } = await supabase.from("emi_plans").insert(planPayload).select("id").single();
 
-        const res = await insertPlan(payload, tf, rf);
-        if (res.fatal) {
-          fatal = res.fatal;
-          break;
-        }
-        if (res.id) {
-          planId = res.id;
-          break;
-        }
+      if (!error && data?.id) {
+        planId = String(data.id);
+        break;
       }
-      if (fatal || planId) break;
-    }
 
-    if (fatal) {
-      setBusy(false);
-      alert(fatal);
-      return;
+      if (error) {
+        const info = errorKind(error);
+
+        if (info.kind === "missing" && info.column && info.column in planPayload) {
+          delete planPayload[info.column];
+          continue;
+        }
+
+        if (info.kind === "notnull" && info.column === "annual_interest_rate") {
+          planPayload.annual_interest_rate = r;
+          continue;
+        }
+
+        setBusy(false);
+        alert(info.message);
+        return;
+      }
     }
 
     if (!planId) {
       setBusy(false);
-      alert("Could not create EMI plan. Your emi_plans table is missing expected columns. Run the SQL fix + reload schema.");
+      alert("Could not create EMI plan after retries. Schema has required fields we are not setting.");
       return;
     }
 
@@ -235,10 +183,41 @@ export default function NewEmi() {
       return;
     }
 
-    const txErr = await insertEmiTransaction(planId, P);
-    if (txErr) {
+    // Insert the conversion as a card transaction, making sure txn_date is populated.
+    const txnAt = new Date(`${purchaseDate}T00:00:00.000Z`).toISOString();
+    let txPayload: any = {
+      user_id: userId,
+      card_id: cardId,
+      amount: P,
+      is_emi: true,
+      emi_plan_id: planId,
+      note: "EMI conversion",
+
+      txn_date: purchaseDate,   // required in your schema
+      spent_on: purchaseDate,
+      transaction_date: purchaseDate,
+      date: purchaseDate,
+
+      spent_at: txnAt,
+      txn_at: txnAt,
+    };
+
+    for (let i = 0; i < 16; i++) {
+      const { error } = await supabase.from("transactions").insert(txPayload);
+      if (!error) break;
+
+      const info = errorKind(error);
+      if (info.kind === "missing" && info.column && info.column in txPayload) {
+        delete txPayload[info.column];
+        continue;
+      }
+      if (info.kind === "notnull" && info.column === "txn_date") {
+        txPayload.txn_date = purchaseDate;
+        continue;
+      }
+
       setBusy(false);
-      alert(txErr);
+      alert(info.message);
       return;
     }
 
@@ -250,7 +229,7 @@ export default function NewEmi() {
     <div className="p-4 text-white space-y-3">
       <div>
         <div className="text-2xl font-semibold tracking-tight">Convert to EMI</div>
-        <div className="mt-1 text-sm text-white/60">Tagged to a card + statement month</div>
+        <div className="mt-1 text-sm text-white/60">Card + statement month</div>
       </div>
 
       <Card className="p-5 space-y-4">
@@ -282,7 +261,7 @@ export default function NewEmi() {
             <Input value={annualRate} onChange={(e) => setAnnualRate(e.target.value)} inputMode="numeric" className="mt-2" />
           </div>
           <div>
-            <div className="text-xs text-white/60">First installment due date</div>
+            <div className="text-xs text-white/60">First installment due</div>
             <Input value={firstDueDate} onChange={(e) => setFirstDueDate(e.target.value)} type="date" className="mt-2" />
           </div>
         </div>
