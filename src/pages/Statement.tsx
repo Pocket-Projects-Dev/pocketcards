@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { supabase } from "../lib/supabase";
-import { Button, Card, Input, ProgressBar } from "../components/ui";
-import { formatINR } from "../lib/format";
+import { Badge, Button, Card, Input, ProgressBar, cx } from "../components/ui";
+import { formatDateShort, formatINR } from "../lib/format";
 
 type CardRow = {
   id: string;
@@ -63,7 +63,7 @@ function makeDate(y: number, m: number, d: number) {
   return `${y}-${pad2(m)}-${pad2(dd)}`;
 }
 function addDays(iso: string, delta: number) {
-  const t = new Date(`${iso}T00:00:00.000Z`).getTime() + delta * 24 * 60 * 60 * 1000;
+  const t = new Date(`${iso}T00:00:00.000Z`).getTime() + delta * 86400000;
   const d = new Date(t);
   return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
 }
@@ -81,6 +81,22 @@ function dateFromPayment(p: PayRow) {
   if (p.paid_at) return isoDate(p.paid_at);
   return isoDate(p.created_at);
 }
+function daysUntilISO(targetISO: string) {
+  const now = new Date();
+  const base = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+  const t = new Date(`${targetISO}T00:00:00.000Z`);
+  const diff = t.getTime() - base.getTime();
+  return Math.ceil(diff / 86400000);
+}
+
+type TLItem = {
+  id: string;
+  date: string;
+  kind: "spend" | "payment" | "emi_due" | "emi_convert";
+  title: string;
+  subtitle?: string;
+  amount: number;
+};
 
 export default function Statement() {
   const { cardId } = useParams();
@@ -120,11 +136,10 @@ export default function Statement() {
     const cycleEnd = closeDate;
 
     const dueSameMonth = card.due_day > card.close_day;
-    const dueY = dueSameMonth ? yy : (mm === 12 ? yy + 1 : yy);
-    const dueM = dueSameMonth ? mm : (mm === 12 ? 1 : mm + 1);
+    const dueY = dueSameMonth ? yy : mm === 12 ? yy + 1 : yy;
+    const dueM = dueSameMonth ? mm : mm === 12 ? 1 : mm + 1;
     const dueDate = makeDate(dueY, dueM, card.due_day);
 
-    // IMPORTANT FIX: payments count from cycleStart (not cycleEnd)
     const payStart = cycleStart;
 
     return { cycleStart, cycleEnd, dueDate, payStart };
@@ -169,7 +184,6 @@ export default function Statement() {
 
       const { cycleStart, cycleEnd, dueDate } = computed;
 
-      // Spends (non-EMI), using whatever date column your schema supports
       const dateFields = ["txn_date", "spent_on", "spent_at", "transaction_date", "date", "created_at"];
       let txRows: any[] = [];
       let usedField: string | null = null;
@@ -208,7 +222,6 @@ export default function Statement() {
         }))
       );
 
-      // Get all EMI plan IDs for card
       const { data: allPlans, error: ape } = await supabase
         .from("emi_plans")
         .select("id")
@@ -222,7 +235,6 @@ export default function Statement() {
 
       const planIds = ((((allPlans as unknown) as any[]) ?? []) as any[]).map((x) => String(x.id));
 
-      // Installments billed on this statement due date
       if (planIds.length === 0) {
         setInstallments([]);
       } else {
@@ -249,7 +261,6 @@ export default function Statement() {
         );
       }
 
-      // Payments for card (we filter into statement window in totals)
       const { data: pay, error: pae } = await supabase
         .from("payments")
         .select("*")
@@ -273,7 +284,6 @@ export default function Statement() {
         }))
       );
 
-      // EMI conversions tagged to this statement month (optional)
       const { data: p, error: pe } = await supabase
         .from("emi_plans")
         .select("id,principal,monthly_emi,purchase_date,statement_month")
@@ -316,23 +326,77 @@ export default function Statement() {
     const emiTotal = installments.reduce((s, x) => s + Number(x.amount || 0), 0);
     const totalDue = spendTotal + emiTotal;
 
-    const payStart = computed.payStart; // now cycleStart
-    const dueDate = computed.dueDate;
-
     const paidTotal = payments
       .filter((p) => {
         const d = dateFromPayment(p);
-        return d >= payStart && d <= dueDate;
+        return d >= computed.payStart && d <= computed.dueDate;
       })
       .reduce((s, p) => s + Number(p.amount || 0), 0);
 
     const remaining = Math.max(0, totalDue - paidTotal);
-
     return { spendTotal, emiTotal, totalDue, paidTotal, remaining };
   }, [computed, spends, installments, payments]);
 
   const payRemaining = totals ? Math.ceil(Number(totals.remaining || 0)) : 0;
-  const paidProgress = totals && totals.totalDue > 0 ? Math.max(0, Math.min(1, totals.paidTotal / totals.totalDue)) : 0;
+  const progress = totals && totals.totalDue > 0 ? Math.max(0, Math.min(1, totals.paidTotal / totals.totalDue)) : 0;
+
+  const dueDays = computed ? daysUntilISO(computed.dueDate) : 0;
+  const dueTone = dueDays <= 3 ? "danger" : dueDays <= 7 ? "warn" : "neutral";
+
+  const timeline = useMemo(() => {
+    if (!computed) return [] as TLItem[];
+
+    const items: TLItem[] = [];
+
+    for (const s of spends) {
+      items.push({
+        id: `sp_${s.id}`,
+        date: s.date,
+        kind: "spend",
+        title: "Spend",
+        subtitle: s.note || undefined,
+        amount: Number(s.amount || 0),
+      });
+    }
+
+    for (const p of payments) {
+      const d = dateFromPayment(p);
+      if (d < computed.payStart || d > computed.dueDate) continue;
+      items.push({
+        id: `pay_${p.id}`,
+        date: d,
+        kind: "payment",
+        title: "Payment recorded",
+        amount: Number(p.amount || 0),
+      });
+    }
+
+    for (const i of installments) {
+      items.push({
+        id: `emi_${i.id}`,
+        date: i.due_date,
+        kind: "emi_due",
+        title: "EMI billed",
+        subtitle: i.paid_at ? "Marked paid" : "Unpaid",
+        amount: Number(i.amount || 0),
+      });
+    }
+
+    for (const p of plansThisMonth) {
+      const d = p.purchase_date || computed.cycleStart;
+      items.push({
+        id: `conv_${p.id}`,
+        date: d,
+        kind: "emi_convert",
+        title: "Converted to EMI",
+        subtitle: p.purchase_date ? `Purchase ${formatDateShort(p.purchase_date)}` : undefined,
+        amount: Number(p.principal || 0),
+      });
+    }
+
+    items.sort((a, b) => (a.date === b.date ? a.kind.localeCompare(b.kind) : b.date.localeCompare(a.date)));
+    return items;
+  }, [computed, spends, payments, installments, plansThisMonth]);
 
   if (loading) return <div className="p-4 text-sm text-white/70">Loading statement…</div>;
 
@@ -343,34 +407,18 @@ export default function Statement() {
 
   return (
     <div className="p-4 text-white space-y-3">
-      <div>
-        <div className="text-2xl font-semibold tracking-tight">
-          {card?.name}{card?.last4 ? ` •••• ${card.last4}` : ""} statement
-        </div>
-        <div className="mt-1 text-sm text-white/60">Cycle → due → actions</div>
-      </div>
-
-      <div className="flex gap-2">
-        <Link to={`/add/spend?card=${card?.id ?? ""}&m=${month}`} className="flex-1">
-          <Button className="w-full">Add spend</Button>
-        </Link>
-
-        {payRemaining > 0 ? (
-          <Link
-            to={`/add/payment?card=${card?.id ?? ""}&m=${month}&amount=${payRemaining}&max=${payRemaining}&withdraw=1`}
-            className="flex-1"
-          >
-            <Button className="w-full">Pay remaining</Button>
-          </Link>
-        ) : (
-          <div className="flex-1">
-            <Button className="w-full" disabled>Paid</Button>
+      <div className="flex items-end justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-2xl font-semibold tracking-tight truncate">
+            {card?.name}{card?.last4 ? ` •••• ${card.last4}` : ""} statement
           </div>
-        )}
-
-        <Link to={`/add/emi?card=${card?.id ?? ""}&m=${month}`} className="flex-1">
-          <Button className="w-full">Convert EMI</Button>
-        </Link>
+          {computed ? (
+            <div className="mt-1 text-sm text-white/60">
+              Cycle {computed.cycleStart} → {computed.cycleEnd} • Due {formatDateShort(computed.dueDate)}
+            </div>
+          ) : null}
+        </div>
+        {computed ? <Badge tone={dueTone}>Due in {dueDays}d</Badge> : null}
       </div>
 
       {err ? <Card className="p-4 text-sm text-red-300">{err}</Card> : null}
@@ -378,128 +426,93 @@ export default function Statement() {
       <Card className="p-5 space-y-3">
         <div className="text-xs text-white/60">Statement month</div>
         <Input type="month" value={month} onChange={(e) => onMonthChange(e.target.value)} />
-        {computed ? (
-          <div className="text-xs text-white/60">
-            Cycle {computed.cycleStart} → {computed.cycleEnd} • Due {computed.dueDate}
-          </div>
-        ) : null}
       </Card>
 
       {totals ? (
-        <Card className="p-5 space-y-3">
+        <Card className="p-5 space-y-4">
           <div className="flex items-start justify-between gap-4">
             <div>
-              <div className="text-xs text-white/60">Total due</div>
-              <div className="mt-2 text-2xl font-semibold">{formatINR(totals.totalDue)}</div>
+              <div className="text-xs text-white/60">Remaining</div>
+              <div className="mt-2 text-3xl font-semibold">{formatINR(totals.remaining)}</div>
               <div className="mt-2 text-xs text-white/60">
-                Spends {formatINR(totals.spendTotal)} • EMI {formatINR(totals.emiTotal)}
+                Total {formatINR(totals.totalDue)} • Paid {formatINR(totals.paidTotal)}
               </div>
             </div>
+
             <div className="text-right">
-              <div className="text-xs text-white/60">Remaining</div>
-              <div className="mt-2 text-2xl font-semibold">{formatINR(totals.remaining)}</div>
-              <div className="mt-2 text-xs text-white/60">Paid {formatINR(totals.paidTotal)}</div>
+              <div className="text-xs text-white/60">Breakdown</div>
+              <div className="mt-2 text-sm text-white/80">Spends {formatINR(totals.spendTotal)}</div>
+              <div className="mt-1 text-sm text-white/80">EMI {formatINR(totals.emiTotal)}</div>
             </div>
           </div>
 
-          <div>
-            <div className="flex items-center justify-between text-xs text-white/60">
-              <span>Paid progress</span>
-              <span>{formatINR(totals.paidTotal)} / {formatINR(totals.totalDue)}</span>
-            </div>
-            <div className="mt-2">
-              <ProgressBar value={paidProgress} />
-            </div>
+          <ProgressBar value={progress} />
+
+          <div className="grid grid-cols-3 gap-2">
+            <Link to={`/add/spend?card=${card?.id ?? ""}&m=${month}`}>
+              <Button className="w-full" size="sm">Add spend</Button>
+            </Link>
+
+            {payRemaining > 0 ? (
+              <Link to={`/add/payment?card=${card?.id ?? ""}&m=${month}&amount=${payRemaining}&max=${payRemaining}&withdraw=1`}>
+                <Button className="w-full" size="sm" variant="primary">Pay remaining</Button>
+              </Link>
+            ) : (
+              <Button className="w-full" size="sm" disabled variant="primary">Paid</Button>
+            )}
+
+            <Link to={`/add/emi?card=${card?.id ?? ""}&m=${month}`}>
+              <Button className="w-full" size="sm">Convert EMI</Button>
+            </Link>
+          </div>
+
+          <div className="text-xs text-white/50">
+            Payments count if recorded between {computed?.payStart} and {computed?.dueDate}.
           </div>
         </Card>
       ) : null}
 
       <Card className="p-5">
-        <div className="text-sm text-white/70">Spends in cycle</div>
-        {spends.length === 0 ? (
-          <div className="mt-3 text-sm text-white/70">No spends in this cycle.</div>
+        <div className="text-sm text-white/70">Timeline</div>
+
+        {timeline.length === 0 ? (
+          <div className="mt-3 text-sm text-white/70">No activity for this statement yet.</div>
         ) : (
           <div className="mt-4 space-y-2">
-            {spends.map((s) => (
-              <div key={s.id} className="rounded-3xl bg-black/30 border border-white/10 p-4 flex items-start justify-between gap-4">
-                <div className="min-w-0">
-                  <div className="text-sm">{s.date}</div>
-                  {s.note ? <div className="mt-1 text-xs text-white/60 truncate">{s.note}</div> : null}
-                </div>
-                <div className="text-sm font-semibold">{formatINR(s.amount)}</div>
-              </div>
-            ))}
-          </div>
-        )}
-      </Card>
+            {timeline.map((t) => {
+              const chip =
+                t.kind === "payment"
+                  ? <Badge tone="good">Payment</Badge>
+                  : t.kind === "spend"
+                  ? <Badge>Spend</Badge>
+                  : t.kind === "emi_due"
+                  ? <Badge tone="warn">EMI</Badge>
+                  : <Badge>Conversion</Badge>;
 
-      <Card className="p-5">
-        <div className="text-sm text-white/70">EMI installments billed (due date)</div>
-        {installments.length === 0 ? (
-          <div className="mt-3 text-sm text-white/70">No EMI installments billed for this statement.</div>
-        ) : (
-          <div className="mt-4 space-y-2">
-            {installments.map((i) => (
-              <div key={i.id} className="rounded-3xl bg-black/30 border border-white/10 p-4 flex items-start justify-between gap-4">
-                <div>
-                  <div className="text-sm">Due {i.due_date}</div>
-                  <div className="mt-1 text-xs text-white/60">{i.paid_at ? "Marked paid" : "Unpaid"}</div>
-                </div>
-                <div className="text-sm font-semibold">{formatINR(i.amount)}</div>
-              </div>
-            ))}
-          </div>
-        )}
-      </Card>
+              const amtTone =
+                t.kind === "payment" ? "text-emerald-200" : t.kind === "spend" || t.kind === "emi_due" ? "text-white" : "text-white";
 
-      <Card className="p-5">
-        <div className="text-sm text-white/70">Payments counted for this statement</div>
-        {computed ? (
-          <div className="mt-2 text-xs text-white/60">
-            Counted if payment date is between {computed.payStart} and {computed.dueDate}.
-          </div>
-        ) : null}
+              const sign = t.kind === "payment" ? "-" : "+";
 
-        {computed && payments.filter((p) => {
-          const d = dateFromPayment(p);
-          return d >= computed.payStart && d <= computed.dueDate;
-        }).length === 0 ? (
-          <div className="mt-3 text-sm text-white/70">No payments in this statement window.</div>
-        ) : computed ? (
-          <div className="mt-4 space-y-2">
-            {payments
-              .filter((p) => {
-                const d = dateFromPayment(p);
-                return d >= computed.payStart && d <= computed.dueDate;
-              })
-              .slice(0, 30)
-              .map((p) => (
-                <div key={p.id} className="rounded-3xl bg-black/30 border border-white/10 p-4 flex items-start justify-between gap-4">
-                  <div className="text-sm">{dateFromPayment(p)}</div>
-                  <div className="text-sm font-semibold">{formatINR(p.amount)}</div>
-                </div>
-              ))}
-          </div>
-        ) : null}
-      </Card>
+              return (
+                <div key={t.id} className="rounded-3xl bg-black/30 border border-white/10 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        {chip}
+                        <div className="text-sm">{formatDateShort(t.date)}</div>
+                      </div>
+                      <div className="mt-2 text-base">{t.title}</div>
+                      {t.subtitle ? <div className="mt-1 text-xs text-white/60 truncate">{t.subtitle}</div> : null}
+                    </div>
 
-      <Card className="p-5">
-        <div className="text-sm text-white/70">EMI conversions tagged to this statement (informational)</div>
-        {plansThisMonth.length === 0 ? (
-          <div className="mt-3 text-sm text-white/70">No EMI conversions tagged to this month.</div>
-        ) : (
-          <div className="mt-4 space-y-2">
-            {plansThisMonth.map((p) => (
-              <div key={p.id} className="rounded-3xl bg-black/30 border border-white/10 p-4 flex items-start justify-between gap-4">
-                <div>
-                  <div className="text-sm">Converted</div>
-                  <div className="mt-1 text-xs text-white/60">
-                    Purchase {p.purchase_date ?? "—"} • {p.statement_month ?? month}
+                    <div className={cx("text-right text-sm font-semibold", amtTone)}>
+                      {t.kind === "payment" ? sign : ""}{formatINR(t.amount)}
+                    </div>
                   </div>
                 </div>
-                <div className="text-sm font-semibold">{formatINR(p.principal)}</div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </Card>
