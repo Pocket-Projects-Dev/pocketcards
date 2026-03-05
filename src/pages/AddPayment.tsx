@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { todayISO } from "../lib/format";
 import { useSession } from "../hooks/useSession";
@@ -7,16 +7,25 @@ import { Button, Card, Input, Select } from "../components/ui";
 
 type CardRow = { id: string; name: string; last4: string | null };
 
-function missingColumnName(err: any) {
+function extractMissingColumn(err: any) {
   const msg = String(err?.message || "");
-  const m = msg.match(/Could not find the '([^']+)' column/i);
-  return m?.[1] ?? null;
+  const m1 = msg.match(/Could not find the '([^']+)' column/i);
+  if (m1) return m1[1];
+  const m2 = msg.match(/column [^\.]+\.(\w+) does not exist/i);
+  if (m2) return m2[1];
+  const m3 = msg.match(/column "([^"]+)" does not exist/i);
+  if (m3) return m3[1];
+  return null;
 }
 
 export default function AddPayment() {
   const { session } = useSession();
   const userId = session?.user?.id ?? null;
+
   const nav = useNavigate();
+  const location = useLocation();
+
+  const preCardId = useMemo(() => new URLSearchParams(location.search).get("card") ?? "", [location.search]);
 
   const [cards, setCards] = useState<CardRow[]>([]);
   const [cardId, setCardId] = useState("");
@@ -26,6 +35,7 @@ export default function AddPayment() {
 
   useEffect(() => {
     let alive = true;
+
     (async () => {
       const { data, error } = await supabase
         .from("cards")
@@ -37,12 +47,17 @@ export default function AddPayment() {
 
       const list = (((data as unknown) as any[]) ?? []) as CardRow[];
       setCards(list);
-      if (!cardId && list[0]?.id) setCardId(list[0].id);
+
+      if (!cardId) {
+        const match = list.find((c) => c.id === preCardId);
+        setCardId(match?.id ?? list[0]?.id ?? "");
+      }
     })();
+
     return () => {
       alive = false;
     };
-  }, []);
+  }, [preCardId]);
 
   const save = async () => {
     if (!userId) return alert("Not signed in.");
@@ -62,15 +77,16 @@ export default function AddPayment() {
       paid_at: paidAtIso,
     };
 
-    for (let i = 0; i < 3; i++) {
+    for (let attempt = 0; attempt < 6; attempt++) {
       const { error } = await supabase.from("payments").insert(payload);
+
       if (!error) {
         setBusy(false);
-        nav("/");
+        nav(`/cards/${cardId}/statement`);
         return;
       }
 
-      const missing = missingColumnName(error);
+      const missing = extractMissingColumn(error);
       if (missing && missing in payload) {
         delete payload[missing];
         continue;
@@ -82,14 +98,14 @@ export default function AddPayment() {
     }
 
     setBusy(false);
-    alert("Payments table is missing date columns. Ensure paid_on and/or paid_at exist, then reload schema cache.");
+    alert("Could not save payment. Ensure payments has paid_on and/or paid_at, then reload PostgREST schema.");
   };
 
   return (
     <div className="p-4 text-white space-y-3">
       <div>
         <div className="text-2xl font-semibold tracking-tight">Add payment</div>
-        <div className="mt-1 text-sm text-white/60">Card payment towards statement</div>
+        <div className="mt-1 text-sm text-white/60">This will be counted toward the statement window</div>
       </div>
 
       <Card className="p-5 space-y-4">
