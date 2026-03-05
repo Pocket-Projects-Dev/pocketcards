@@ -167,14 +167,15 @@ export default function NewEmi() {
       return;
     }
 
-    const installmentsPayload = schedule.installments.map((x) => ({
-      user_id: userId,
-      emi_plan_id: planId,
-      due_date: x.due_date,
-      amount: x.amount,
-      principal_component: x.principal_component,
-      interest_component: x.interest_component,
-    }));
+  const installmentsPayload = schedule.installments.map((x) => ({
+  user_id: userId,
+  emi_plan_id: planId,
+  installment_no: x.index, // <-- required by your DB
+  due_date: x.due_date,
+  amount: x.amount,
+  principal_component: x.principal_component,
+  interest_component: x.interest_component,
+  }));
 
     const { error: instErr } = await supabase.from("emi_installments").insert(installmentsPayload);
     if (instErr) {
