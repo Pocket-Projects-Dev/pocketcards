@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { todayISO } from "../lib/format";
 import { useSession } from "../hooks/useSession";
@@ -7,15 +7,25 @@ import { Button, Card, Input, Select } from "../components/ui";
 
 type CardRow = { id: string; name: string; last4: string | null };
 
-function missingColumn(err: any, col: string) {
-  const msg = String(err?.message || "").toLowerCase();
-  return msg.includes("could not find") && msg.includes(`'${col.toLowerCase()}'`) && msg.includes("schema cache");
+function extractMissingColumn(err: any) {
+  const msg = String(err?.message || "");
+  const m1 = msg.match(/Could not find the '([^']+)' column/i);
+  if (m1) return m1[1];
+  const m2 = msg.match(/column [^\.]+\.(\w+) does not exist/i);
+  if (m2) return m2[1];
+  const m3 = msg.match(/column "([^"]+)" does not exist/i);
+  if (m3) return m3[1];
+  return null;
 }
 
 export default function AddSpend() {
   const { session } = useSession();
   const userId = session?.user?.id ?? null;
+
   const nav = useNavigate();
+  const location = useLocation();
+
+  const preCardId = useMemo(() => new URLSearchParams(location.search).get("card") ?? "", [location.search]);
 
   const [cards, setCards] = useState<CardRow[]>([]);
   const [cardId, setCardId] = useState("");
@@ -26,6 +36,7 @@ export default function AddSpend() {
 
   useEffect(() => {
     let alive = true;
+
     (async () => {
       const { data, error } = await supabase
         .from("cards")
@@ -37,12 +48,17 @@ export default function AddSpend() {
 
       const list = (((data as unknown) as any[]) ?? []) as CardRow[];
       setCards(list);
-      if (!cardId && list[0]?.id) setCardId(list[0].id);
+
+      if (!cardId) {
+        const match = list.find((c) => c.id === preCardId);
+        setCardId(match?.id ?? list[0]?.id ?? "");
+      }
     })();
+
     return () => {
       alive = false;
     };
-  }, []);
+  }, [preCardId]);
 
   const save = async () => {
     if (!userId) return alert("Not signed in.");
@@ -52,36 +68,61 @@ export default function AddSpend() {
 
     setBusy(true);
 
+    const spentAtIso = new Date(`${spentOn}T00:00:00.000Z`).toISOString();
+
     const base: any = {
       user_id: userId,
       card_id: cardId,
       amount: amt,
-      spent_on: spentOn,
       is_emi: false,
       emi_plan_id: null,
     };
 
-    const withNote: any = { ...base };
-    if (note.trim()) withNote.note = note.trim();
+    const noteVal = note.trim();
 
-    let { error } = await supabase.from("transactions").insert(withNote);
+    const dateCandidates: Array<{ field: string; value: any }> = [
+      { field: "spent_on", value: spentOn },
+      { field: "spent_at", value: spentAtIso },
+      { field: "transaction_date", value: spentOn },
+      { field: "date", value: spentOn },
+    ];
 
-    if (error && missingColumn(error, "note")) {
-      const { error: e2 } = await supabase.from("transactions").insert(base);
-      error = e2;
+    for (const c of dateCandidates) {
+      let payload: any = { ...base, [c.field]: c.value };
+      if (noteVal) payload.note = noteVal;
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const { error } = await supabase.from("transactions").insert(payload);
+
+        if (!error) {
+          setBusy(false);
+          nav(`/cards/${cardId}/statement`);
+          return;
+        }
+
+        const missing = extractMissingColumn(error);
+
+        if (missing && missing in payload) {
+          if (missing === c.field) break; // try next date field
+          delete payload[missing]; // drop optional (like note) and retry
+          continue;
+        }
+
+        setBusy(false);
+        alert(error.message);
+        return;
+      }
     }
 
     setBusy(false);
-
-    if (error) return alert(error.message);
-    nav("/");
+    alert("Could not save spend. Your transactions table is missing a usable date column. Run the SQL fix + reload schema.");
   };
 
   return (
     <div className="p-4 text-white space-y-3">
       <div>
         <div className="text-2xl font-semibold tracking-tight">Add spend</div>
-        <div className="mt-1 text-sm text-white/60">Regular card spend (non-EMI)</div>
+        <div className="mt-1 text-sm text-white/60">This will show up in the card’s statement cycle</div>
       </div>
 
       <Card className="p-5 space-y-4">

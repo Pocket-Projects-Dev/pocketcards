@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { supabase } from "../lib/supabase";
-import { Card, Input } from "../components/ui";
+import { Card, Input, Button } from "../components/ui";
 import { formatINR } from "../lib/format";
 
 type CardRow = {
@@ -14,66 +14,50 @@ type CardRow = {
   credit_limit: number | null;
 };
 
-type SpendRow = {
-  id: string;
-  spent_on: string;
-  amount: number;
-  note: string | null;
-};
+type SpendRow = { id: string; date: string; amount: number; note: string | null };
 
-type PlanRow = {
-  id: string;
-  principal: number;
-  monthly_emi: number;
-  purchase_date: string | null;
-  statement_month: string | null;
-};
+type PlanRow = { id: string; principal: number; monthly_emi: number; purchase_date: string | null; statement_month: string | null };
 
-type InstRow = {
-  id: string;
-  emi_plan_id: string;
-  due_date: string;
-  amount: number;
-  paid_at: string | null;
-};
+type InstRow = { id: string; emi_plan_id: string; due_date: string; amount: number; paid_at: string | null };
 
-type PayRow = {
-  id: string;
-  amount: number;
-  paid_on: string | null;
-  paid_at: string | null;
-  created_at: string;
-};
+type PayRow = { id: string; amount: number; paid_on: string | null; paid_at: string | null; created_at: string };
 
-function pad2(n: number) {
-  return String(n).padStart(2, "0");
+function extractMissingColumn(err: any) {
+  const msg = String(err?.message || "");
+  const m1 = msg.match(/Could not find the '([^']+)' column/i);
+  if (m1) return m1[1];
+  const m2 = msg.match(/column [^\.]+\.(\w+) does not exist/i);
+  if (m2) return m2[1];
+  const m3 = msg.match(/column "([^"]+)" does not exist/i);
+  if (m3) return m3[1];
+  return null;
 }
 
-function daysInMonth(y: number, m: number) {
-  return new Date(Date.UTC(y, m, 0)).getUTCDate(); // m is 1-12
-}
-
+function pad2(n: number) { return String(n).padStart(2, "0"); }
+function daysInMonth(y: number, m: number) { return new Date(Date.UTC(y, m, 0)).getUTCDate(); }
 function makeDate(y: number, m: number, d: number) {
   const last = daysInMonth(y, m);
   const dd = Math.min(d, last);
   return `${y}-${pad2(m)}-${pad2(dd)}`;
 }
-
 function addDays(iso: string, delta: number) {
   const t = new Date(`${iso}T00:00:00.000Z`).getTime() + delta * 24 * 60 * 60 * 1000;
   const d = new Date(t);
   return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
 }
-
 function ymNow() {
   const d = new Date();
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
 }
-
+function isoDate(v: any) {
+  if (!v) return "";
+  const s = String(v);
+  return s.includes("T") ? s.slice(0, 10) : s.slice(0, 10);
+}
 function dateFromPayment(p: PayRow) {
   if (p.paid_on) return p.paid_on;
-  if (p.paid_at) return String(p.paid_at).slice(0, 10);
-  return String(p.created_at).slice(0, 10);
+  if (p.paid_at) return isoDate(p.paid_at);
+  return isoDate(p.created_at);
 }
 
 export default function Statement() {
@@ -82,10 +66,12 @@ export default function Statement() {
 
   const [month, setMonth] = useState(ymNow());
   const [card, setCard] = useState<CardRow | null>(null);
+
   const [spends, setSpends] = useState<SpendRow[]>([]);
   const [plansThisMonth, setPlansThisMonth] = useState<PlanRow[]>([]);
   const [installments, setInstallments] = useState<InstRow[]>([]);
   const [payments, setPayments] = useState<PayRow[]>([]);
+
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
@@ -137,9 +123,7 @@ export default function Statement() {
       setLoading(false);
     })();
 
-    return () => {
-      alive = false;
-    };
+    return () => { alive = false; };
   }, [id]);
 
   useEffect(() => {
@@ -151,52 +135,43 @@ export default function Statement() {
 
       const { cycleStart, cycleEnd, dueDate } = computed;
 
-      const { data: tx, error: te } = await supabase
-        .from("transactions")
-        .select("id,spent_on,amount,note,is_emi")
-        .eq("card_id", card.id)
-        .eq("is_emi", false)
-        .gte("spent_on", cycleStart)
-        .lte("spent_on", cycleEnd)
-        .order("spent_on", { ascending: false });
+      const dateFields = ["spent_on", "spent_at", "transaction_date", "date", "created_at"];
+      let txRows: any[] = [];
+      let usedField: string | null = null;
 
-      if (!alive) return;
-      if (te) {
-        setErr(te.message);
+      for (const f of dateFields) {
+        const { data, error } = await supabase
+          .from("transactions")
+          .select("*")
+          .eq("card_id", card.id)
+          .eq("is_emi", false)
+          .gte(f, cycleStart)
+          .lte(f, cycleEnd)
+          .order(f, { ascending: false });
+
+        if (!alive) return;
+
+        if (!error) {
+          txRows = (((data as unknown) as any[]) ?? []) as any[];
+          usedField = f;
+          break;
+        }
+
+        const missing = extractMissingColumn(error);
+        if (missing === f) continue;
+
+        setErr(error.message);
         return;
       }
 
       setSpends(
-        ((((tx as unknown) as any[]) ?? []) as any[]).map((r) => ({
+        txRows.map((r) => ({
           id: String(r.id),
-          spent_on: String(r.spent_on),
+          date: usedField ? isoDate(r[usedField]) : isoDate(r.created_at),
           amount: Number(r.amount || 0),
           note: r.note ? String(r.note) : null,
         }))
       );
-
-      const { data: p, error: pe } = await supabase
-        .from("emi_plans")
-        .select("id,principal,monthly_emi,purchase_date,statement_month")
-        .eq("card_id", card.id)
-        .eq("statement_month", month)
-        .order("created_at", { ascending: false });
-
-      if (!alive) return;
-      if (pe) {
-        setErr(pe.message);
-        return;
-      }
-
-      const plans = ((((p as unknown) as any[]) ?? []) as any[]).map((r) => ({
-        id: String(r.id),
-        principal: Number(r.principal || 0),
-        monthly_emi: Number(r.monthly_emi || 0),
-        purchase_date: r.purchase_date ? String(r.purchase_date) : null,
-        statement_month: r.statement_month ? String(r.statement_month) : null,
-      })) as PlanRow[];
-
-      setPlansThisMonth(plans);
 
       const { data: allPlans, error: ape } = await supabase
         .from("emi_plans")
@@ -209,7 +184,8 @@ export default function Statement() {
         return;
       }
 
-      const planIds = (((allPlans as unknown) as any[]) ?? []).map((x: any) => String(x.id));
+      const planIds = ((((allPlans as unknown) as any[]) ?? []) as any[]).map((x) => String(x.id));
+
       if (planIds.length === 0) {
         setInstallments([]);
       } else {
@@ -217,8 +193,7 @@ export default function Statement() {
           .from("emi_installments")
           .select("id,emi_plan_id,due_date,amount,paid_at")
           .in("emi_plan_id", planIds)
-          .eq("due_date", dueDate)
-          .order("created_at", { ascending: true });
+          .eq("due_date", dueDate);
 
         if (!alive) return;
         if (ie) {
@@ -239,7 +214,7 @@ export default function Statement() {
 
       const { data: pay, error: pae } = await supabase
         .from("payments")
-        .select("id,amount,paid_on,paid_at,created_at")
+        .select("*")
         .eq("card_id", card.id)
         .order("created_at", { ascending: false })
         .limit(200);
@@ -259,11 +234,38 @@ export default function Statement() {
           created_at: String(r.created_at),
         }))
       );
+
+      const { data: p, error: pe } = await supabase
+        .from("emi_plans")
+        .select("id,principal,monthly_emi,purchase_date,statement_month")
+        .eq("card_id", card.id)
+        .eq("statement_month", month)
+        .order("created_at", { ascending: false });
+
+      if (!alive) return;
+
+      if (pe) {
+        const missing = extractMissingColumn(pe);
+        if (missing === "statement_month" || missing === "purchase_date") {
+          setPlansThisMonth([]);
+        } else {
+          setErr(pe.message);
+          return;
+        }
+      } else {
+        setPlansThisMonth(
+          ((((p as unknown) as any[]) ?? []) as any[]).map((r) => ({
+            id: String(r.id),
+            principal: Number(r.principal || 0),
+            monthly_emi: Number(r.monthly_emi || 0),
+            purchase_date: r.purchase_date ? String(r.purchase_date) : null,
+            statement_month: r.statement_month ? String(r.statement_month) : null,
+          }))
+        );
+      }
     })();
 
-    return () => {
-      alive = false;
-    };
+    return () => { alive = false; };
   }, [card, computed, month]);
 
   const totals = useMemo(() => {
@@ -300,7 +302,13 @@ export default function Statement() {
         <div className="text-2xl font-semibold tracking-tight">
           {card?.name}{card?.last4 ? ` •••• ${card.last4}` : ""} statement
         </div>
-        <div className="mt-1 text-sm text-white/60">Month-based statement view (cycle + due)</div>
+        <div className="mt-1 text-sm text-white/60">Cycle → due → actions</div>
+      </div>
+
+      <div className="flex gap-2">
+        <Link to={`/add/spend?card=${card?.id ?? ""}`} className="flex-1"><Button className="w-full">Add spend</Button></Link>
+        <Link to={`/add/payment?card=${card?.id ?? ""}`} className="flex-1"><Button className="w-full">Add payment</Button></Link>
+        <Link to={`/add/emi?card=${card?.id ?? ""}`} className="flex-1"><Button className="w-full">Convert EMI</Button></Link>
       </div>
 
       {err ? <Card className="p-4 text-sm text-red-300">{err}</Card> : null}
@@ -341,7 +349,7 @@ export default function Statement() {
             {spends.map((s) => (
               <div key={s.id} className="rounded-3xl bg-black/30 border border-white/10 p-4 flex items-start justify-between gap-4">
                 <div className="min-w-0">
-                  <div className="text-sm">{s.spent_on}</div>
+                  <div className="text-sm">{s.date}</div>
                   {s.note ? <div className="mt-1 text-xs text-white/60 truncate">{s.note}</div> : null}
                 </div>
                 <div className="text-sm font-semibold">{formatINR(s.amount)}</div>
