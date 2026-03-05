@@ -14,6 +14,8 @@ import AppShell from "./components/AppShell";
 import { useSession } from "./hooks/useSession";
 import Statement from "./pages/Statement";
 import EditCard from "./pages/EditCard";
+import Privacy from "./pages/Privacy";
+import Terms from "./pages/Terms";
 
 export default function App() {
   const { session, loading } = useSession();
@@ -23,6 +25,9 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={session ? <Navigate to="/" replace /> : <Login />} />
+
+      <Route path="/privacy" element={<Privacy />} />
+      <Route path="/terms" element={<Terms />} />
 
       <Route element={session ? <AppShell /> : <Navigate to="/login" replace />}>
         <Route path="/" element={<Dashboard />} />

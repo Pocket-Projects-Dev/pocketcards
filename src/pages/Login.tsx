@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 
 export default function Login() {
@@ -37,6 +38,11 @@ export default function Login() {
         >
           {busy ? "Starting Google sign-in…" : "Continue with Google"}
         </button>
+
+        <div className="mt-6 flex justify-center gap-4 text-xs text-white/60">
+          <Link to="/privacy" className="hover:text-white">Privacy</Link>
+          <Link to="/terms" className="hover:text-white">Terms</Link>
+        </div>
       </div>
     </div>
   );
