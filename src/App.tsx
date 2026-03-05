@@ -12,6 +12,7 @@ import Emis from "./pages/Emis";
 import Plan from "./pages/Plan";
 import AppShell from "./components/AppShell";
 import { useSession } from "./hooks/useSession";
+import Statement from "./pages/Statement";
 
 export default function App() {
   const { session, loading } = useSession();
@@ -32,6 +33,7 @@ export default function App() {
         <Route path="/add/payment" element={<AddPayment />} />
         <Route path="/add/income" element={<AddIncome />} />
         <Route path="/add/emi" element={<NewEmi />} />
+        <Route path="/cards/:cardId/statement" element={<Statement />} />
 
         <Route path="/emis" element={<Emis />} />
         <Route path="/plan" element={<Plan />} />
