@@ -80,7 +80,7 @@ export default function Privacy() {
         <Card className="p-5 space-y-2">
           <div className="text-sm text-white/70">Contact</div>
           <div className="text-sm text-white/60">
-            Email: replace-this-with-your-support-email
+            Email: support@pocketprojects.in
           </div>
         </Card>
 
