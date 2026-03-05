@@ -13,6 +13,7 @@ import Plan from "./pages/Plan";
 import AppShell from "./components/AppShell";
 import { useSession } from "./hooks/useSession";
 import Statement from "./pages/Statement";
+import EditCard from "./pages/EditCard";
 
 export default function App() {
   const { session, loading } = useSession();
@@ -34,6 +35,7 @@ export default function App() {
         <Route path="/add/income" element={<AddIncome />} />
         <Route path="/add/emi" element={<NewEmi />} />
         <Route path="/cards/:cardId/statement" element={<Statement />} />
+        <Route path="/cards/:cardId/edit" element={<EditCard />} />
 
         <Route path="/emis" element={<Emis />} />
         <Route path="/plan" element={<Plan />} />

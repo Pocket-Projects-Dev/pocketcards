@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
-import { Link } from "react-router-dom";
-import { Card, ProgressBar } from "../components/ui";
+import { Card, ProgressBar, Button } from "../components/ui";
 import { formatINR } from "../lib/format";
 
 type CardRow = {
@@ -20,6 +20,8 @@ type SummaryRow = {
 };
 
 export default function Cards() {
+  const nav = useNavigate();
+
   const [cards, setCards] = useState<CardRow[]>([]);
   const [summary, setSummary] = useState<SummaryRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -82,7 +84,9 @@ export default function Cards() {
           <div className="text-2xl font-semibold tracking-tight">Cards</div>
           <div className="mt-1 text-sm text-white/60">Limits + statements</div>
         </div>
-        <Link to="/cards/new" className="text-sm text-white/70">Add</Link>
+        <Link to="/cards/new">
+          <Button variant="primary" size="sm">Add card</Button>
+        </Link>
       </div>
 
       {err ? <Card className="p-4 text-sm text-red-300">{err}</Card> : null}
@@ -99,41 +103,43 @@ export default function Cards() {
             const pct = limit > 0 ? Math.max(0, Math.min(1, used / limit)) : 0;
 
             return (
-              <Link key={c.id} to={`/cards/${c.id}/statement`}>
-                <Card className="p-5 hover:bg-white/[0.06] transition">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0">
-                      <div className="text-base font-medium">
-                        {c.name}{c.last4 ? ` •••• ${c.last4}` : ""}
-                      </div>
-                      <div className="mt-1 text-sm text-white/60">
-                        Next due {s?.due_date ? s.due_date : "—"}{typeof s?.days_to_due === "number" ? ` • ${s.days_to_due} days` : ""}
-                      </div>
+              <Card
+                key={c.id}
+                className="p-5 cursor-pointer hover:bg-white/[0.06] transition"
+                onClick={() => nav(`/cards/${c.id}/statement`)}
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <div className="text-base font-medium">
+                      {c.name}{c.last4 ? ` •••• ${c.last4}` : ""}
                     </div>
-                    <div className="text-right">
-                      {limit > 0 ? (
-                        <>
-                          <div className="text-sm text-white/60">Limit left</div>
-                          <div className="text-base font-semibold">
-                            {formatINR(left)} / {formatINR(limit)}
-                          </div>
-                        </>
-                      ) : (
-                        <div className="text-sm text-white/60">Set limit</div>
-                      )}
+                    <div className="mt-1 text-sm text-white/60">
+                      Next due {s?.due_date ? s.due_date : "—"}{typeof s?.days_to_due === "number" ? ` • ${s.days_to_due} days` : ""}
                     </div>
                   </div>
 
-                  {limit > 0 ? (
-                    <div className="mt-4 space-y-2">
-                      <ProgressBar value={pct} />
-                      <div className="text-xs text-white/60">
-                        Limit used: {formatINR(used)} / {formatINR(limit)}
-                      </div>
+                  <div onClick={(e) => e.stopPropagation()}>
+                    <Link to={`/cards/${c.id}/edit`}>
+                      <Button variant="ghost" size="sm">Edit</Button>
+                    </Link>
+                  </div>
+                </div>
+
+                {limit > 0 ? (
+                  <div className="mt-4 space-y-2">
+                    <div className="flex items-center justify-between text-xs text-white/60">
+                      <span>Limit left</span>
+                      <span>{formatINR(left)} / {formatINR(limit)}</span>
                     </div>
-                  ) : null}
-                </Card>
-              </Link>
+                    <ProgressBar value={pct} />
+                    <div className="text-xs text-white/60">
+                      Limit used: {formatINR(used)} / {formatINR(limit)}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-4 text-xs text-white/60">Set a credit limit in Edit.</div>
+                )}
+              </Card>
             );
           })}
         </div>

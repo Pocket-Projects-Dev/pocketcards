@@ -21,7 +21,7 @@ export default function Login() {
   return (
     <div className="min-h-screen bg-black text-white p-4 flex items-center justify-center">
       <div className="w-full max-w-md rounded-2xl bg-white/5 p-5">
-        <div className="text-lg font-semibold">Cards</div>
+        <div className="text-lg font-semibold">PocketCards</div>
         <div className="mt-1 text-sm text-white/70">Sign in to continue</div>
 
         {missingEnv ? (
