@@ -1,7 +1,9 @@
 import type {
   ButtonHTMLAttributes,
+  CSSProperties,
   HTMLAttributes,
   InputHTMLAttributes,
+  ReactNode,
   SelectHTMLAttributes,
 } from "react";
 
@@ -15,7 +17,8 @@ export function Card(props: HTMLAttributes<HTMLDivElement>) {
     <div
       {...rest}
       className={cx(
-        "relative overflow-hidden rounded-3xl border border-white/10 bg-white/[0.045] shadow-[0_12px_50px_rgba(0,0,0,0.55)] backdrop-blur",
+        "relative overflow-hidden rounded-3xl border border-white/10 bg-white/[0.045]",
+        "shadow-[0_12px_50px_rgba(0,0,0,0.55)] backdrop-blur transition duration-300",
         "before:pointer-events-none before:absolute before:inset-0 before:opacity-60",
         "before:bg-[radial-gradient(900px_260px_at_20%_-10%,rgba(255,255,255,0.12),transparent_60%)]",
         className
@@ -33,7 +36,7 @@ export function Button(props: ButtonProps) {
   const { className, variant = "secondary", size = "md", ...rest } = props;
 
   const base =
-    "inline-flex items-center justify-center rounded-2xl font-medium transition active:scale-[0.99] disabled:opacity-50 disabled:active:scale-100";
+    "inline-flex items-center justify-center rounded-2xl font-medium transition duration-200 active:scale-[0.985] disabled:opacity-50 disabled:active:scale-100";
   const sizes =
     size === "sm"
       ? "px-3 py-2 text-sm"
@@ -62,6 +65,7 @@ export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
         "w-full rounded-2xl bg-black/35 border border-white/10 px-4 py-3 text-white outline-none",
         "placeholder:text-white/30",
         "focus:border-violet-300/25 focus:ring-2 focus:ring-violet-500/10",
+        "transition duration-200",
         className
       )}
     />
@@ -75,26 +79,31 @@ export function Select(props: SelectHTMLAttributes<HTMLSelectElement>) {
       {...rest}
       className={cx(
         "w-full rounded-2xl bg-black/35 border border-white/10 px-4 py-3 text-white outline-none",
-        "focus:border-violet-300/25 focus:ring-2 focus:ring-violet-500/10",
+        "focus:border-violet-300/25 focus:ring-2 focus:ring-violet-500/10 transition duration-200",
         className
       )}
     />
   );
 }
 
-export function ProgressBar(props: { value: number }) {
+export function ProgressBar(props: { value: number; className?: string }) {
   const v = Math.max(0, Math.min(1, Number(props.value || 0)));
+
   return (
-    <div className="h-2 w-full rounded-full bg-white/10 overflow-hidden">
+    <div className={cx("h-2 w-full rounded-full bg-white/10 overflow-hidden", props.className)}>
       <div
-        className="h-full rounded-full bg-gradient-to-r from-violet-400/70 to-fuchsia-400/50"
+        className="h-full rounded-full bg-gradient-to-r from-violet-400/70 to-fuchsia-400/50 transition-[width] duration-700 ease-out"
         style={{ width: `${v * 100}%` }}
       />
     </div>
   );
 }
 
-export function Badge(props: { children: any; tone?: "neutral" | "danger" | "good" | "warn" }) {
+export function Badge(props: {
+  children: ReactNode;
+  tone?: "neutral" | "danger" | "good" | "warn";
+  className?: string;
+}) {
   const tone = props.tone ?? "neutral";
   const cls =
     tone === "danger"
@@ -106,7 +115,7 @@ export function Badge(props: { children: any; tone?: "neutral" | "danger" | "goo
       : "border-white/10 bg-white/5 text-white/80";
 
   return (
-    <span className={cx("inline-flex items-center rounded-full border px-2.5 py-1 text-xs", cls)}>
+    <span className={cx("inline-flex items-center rounded-full border px-2.5 py-1 text-xs", cls, props.className)}>
       {props.children}
     </span>
   );
@@ -114,4 +123,43 @@ export function Badge(props: { children: any; tone?: "neutral" | "danger" | "goo
 
 export function Skeleton(props: { className?: string }) {
   return <div className={cx("animate-pulse rounded-2xl bg-white/10", props.className)} />;
+}
+
+export function RingMeter(props: {
+  value: number;
+  size?: number;
+  thickness?: number;
+  from?: string;
+  to?: string;
+  label?: ReactNode;
+  sublabel?: ReactNode;
+  className?: string;
+}) {
+  const value = Math.max(0, Math.min(1, Number(props.value || 0)));
+  const size = props.size ?? 92;
+  const thickness = props.thickness ?? 8;
+  const from = props.from ?? "#8b5cf6";
+  const to = props.to ?? "#ec4899";
+
+  const outer: CSSProperties = {
+    width: size,
+    height: size,
+    background: `conic-gradient(${from} 0deg, ${to} ${value * 360}deg, rgba(255,255,255,0.08) ${value * 360}deg 360deg)`,
+  };
+
+  const inner: CSSProperties = {
+    inset: thickness,
+  };
+
+  return (
+    <div className={cx("relative shrink-0 rounded-full", props.className)} style={outer}>
+      <div
+        className="absolute rounded-full bg-[#0a0a0a]/95 border border-white/10 flex flex-col items-center justify-center text-center px-1"
+        style={inner}
+      >
+        {props.label ? <div className="text-sm font-semibold">{props.label}</div> : null}
+        {props.sublabel ? <div className="mt-0.5 text-[10px] text-white/50">{props.sublabel}</div> : null}
+      </div>
+    </div>
+  );
 }

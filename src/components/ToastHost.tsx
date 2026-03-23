@@ -34,11 +34,7 @@ export function toast(input: ToastInput, type: ToastType = "info") {
   if (typeof window === "undefined") return;
 
   if (typeof input === "string") {
-    window.dispatchEvent(
-      new CustomEvent(EVENT, {
-        detail: { message: input, type },
-      })
-    );
+    window.dispatchEvent(new CustomEvent(EVENT, { detail: { message: input, type } }));
     return;
   }
 
@@ -81,7 +77,7 @@ export default function ToastHost() {
 
       window.setTimeout(() => {
         setItems((prev) => prev.filter((t) => t.id !== item.id));
-      }, 4000);
+      }, 4200);
     };
 
     window.addEventListener(EVENT, onToast as EventListener);
@@ -114,7 +110,6 @@ export default function ToastHost() {
           >
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">{t.message}</div>
-
               {t.action ? (
                 <Button
                   size="sm"

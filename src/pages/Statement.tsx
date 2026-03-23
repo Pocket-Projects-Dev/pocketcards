@@ -2,12 +2,15 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { Badge, Button, Card, Input, ProgressBar, Skeleton, cx } from "../components/ui";
-import { formatDateShort, formatINR } from "../lib/format";
+import { formatDateShort, formatINR, todayISO } from "../lib/format";
 import { cacheGet, cacheSet } from "../lib/cache";
 import { computeCycleWindow, daysUntilISO, getCurrentCycleMonth, isoDate } from "../lib/statement";
 import { getPendingActions, onQueueChange, type PendingAction } from "../lib/offlineQueue";
 import { createSpend, deleteSpend, isOfflineError } from "../lib/dbOps";
 import { toast } from "../components/ToastHost";
+import AnimatedNumber from "../components/AnimatedNumber";
+import SwipeRow from "../components/SwipeRow";
+import { getCardAccent } from "../lib/cardTheme";
 
 type CardRow = {
   id: string;
@@ -79,6 +82,12 @@ function dateFromPayment(p: PayRow) {
   return isoDate(p.created_at);
 }
 
+function addDaysLocal(dateISO: string, delta: number) {
+  const d = new Date(`${dateISO}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + delta);
+  return d.toISOString().slice(0, 10);
+}
+
 function StatementSkeleton() {
   return (
     <div className="p-4 text-white space-y-3">
@@ -99,11 +108,6 @@ function StatementSkeleton() {
         <Skeleton className="h-4 w-20" />
         <Skeleton className="h-10 w-40" />
         <Skeleton className="h-2 w-full rounded-full" />
-        <div className="grid grid-cols-3 gap-2">
-          <Skeleton className="h-10 w-full" />
-          <Skeleton className="h-10 w-full" />
-          <Skeleton className="h-10 w-full" />
-        </div>
       </Card>
     </div>
   );
@@ -151,6 +155,8 @@ export default function Statement() {
     if (!card || !activeMonth) return null;
     return computeCycleWindow(activeMonth, card.close_day, card.due_day);
   }, [card, activeMonth]);
+
+  const accent = useMemo(() => getCardAccent(card?.name, card?.issuer), [card?.name, card?.issuer]);
 
   const pendingActions = useMemo(() => getPendingActions(), [queueTick]);
 
@@ -438,6 +444,14 @@ export default function Statement() {
   const dueDays = computed ? daysUntilISO(computed.dueDate) : 0;
   const dueTone = dueDays <= 3 ? "danger" : dueDays <= 7 ? "warn" : "neutral";
 
+  const rewardCopy = useMemo(() => {
+    if (!totals) return "";
+    if (totals.totalDue <= 0) return "Nothing has hit this cycle yet.";
+    if (totals.remaining <= 0) return "Nice. This cycle is fully clear.";
+    if (dueDays <= 3) return "A small action now will feel good later.";
+    return "Stay steady. This cycle is under control.";
+  }, [totals, dueDays]);
+
   const timeline = useMemo(() => {
     if (!computed) return [] as TLItem[];
 
@@ -497,6 +511,32 @@ export default function Statement() {
     [filteredTimeline]
   );
 
+  const groupedTimeline = useMemo(() => {
+    const today = todayISO();
+    const weekCutoff = addDaysLocal(today, -6);
+
+    const groups = [
+      { key: "today", label: "Today", items: [] as TLItem[] },
+      { key: "week", label: "This week", items: [] as TLItem[] },
+      { key: "earlier", label: "Earlier in cycle", items: [] as TLItem[] },
+    ];
+
+    for (const item of filteredTimeline) {
+      if (item.date === today) {
+        groups[0].items.push(item);
+      } else if (item.date >= weekCutoff) {
+        groups[1].items.push(item);
+      } else {
+        groups[2].items.push(item);
+      }
+    }
+
+    return groups.filter((g) => g.items.length > 0).map((g) => ({
+      ...g,
+      total: g.items.reduce((s, x) => s + Number(x.amount || 0), 0),
+    }));
+  }, [filteredTimeline]);
+
   const removeSpend = async (item: TLItem) => {
     if (!card || !item.spendId) return;
 
@@ -511,7 +551,7 @@ export default function Statement() {
     if (result.ok) {
       setRefreshNonce((x) => x + 1);
       toast({
-        message: "Spend deleted",
+        message: "Nice. Spend removed from this cycle.",
         type: "success",
         actionLabel: "Undo",
         onAction: async () => {
@@ -533,7 +573,7 @@ export default function Statement() {
           }
 
           if (isOfflineError(undo.error)) {
-            toast("Offline. Undo after delete needs connection.", "error");
+            toast("Reconnect to undo this delete.", "error");
             return;
           }
 
@@ -544,7 +584,7 @@ export default function Statement() {
     }
 
     if (isOfflineError(result.error)) {
-      toast("Offline delete is queued from the edit screen only.", "error");
+      toast("Offline delete is available from the edit screen only.", "error");
       return;
     }
 
@@ -591,25 +631,40 @@ export default function Statement() {
       </Card>
 
       {totals ? (
-        <Card className="p-5 space-y-4">
+        <Card
+          className="p-5 overflow-hidden"
+          style={{
+            backgroundImage: `linear-gradient(135deg, ${accent.soft}, rgba(255,255,255,0.02))`,
+            boxShadow: `0 18px 45px ${accent.glow}`,
+          }}
+        >
+          <div className="mb-4 h-1.5 rounded-full" style={{ background: `linear-gradient(90deg, ${accent.from}, ${accent.to})` }} />
+
           <div className="flex items-start justify-between gap-4">
             <div>
               <div className="text-xs text-white/60">Remaining</div>
-              <div className="mt-2 text-3xl font-semibold">{formatINR(totals.remaining)}</div>
-              <div className="mt-2 text-xs text-white/60">
-                Total {formatINR(totals.totalDue)} • Paid {formatINR(totals.paidTotal)}
+              <div className="mt-2 text-4xl font-semibold">
+                <AnimatedNumber value={totals.remaining} formatter={(n) => formatINR(n)} />
               </div>
+              <div className="mt-3 text-sm text-white/65">{rewardCopy}</div>
             </div>
 
             <div className="text-right">
               <div className="text-xs text-white/60">Breakdown</div>
               <div className="mt-2 text-sm text-white/80">Spends {formatINR(totals.spendTotal)}</div>
               <div className="mt-1 text-sm text-white/80">EMI {formatINR(totals.emiTotal)}</div>
+              <div className="mt-3 text-xs text-white/55">Paid {formatINR(totals.paidTotal)}</div>
             </div>
           </div>
 
-          <ProgressBar value={progress} />
+          <div className="mt-4">
+            <ProgressBar value={progress} />
+          </div>
+        </Card>
+      ) : null}
 
+      <div className="sticky bottom-[88px] z-20">
+        <Card className="p-3 bg-black/60 backdrop-blur-xl">
           <div className="grid grid-cols-3 gap-2">
             <Link to={`/add/spend?card=${card?.id ?? ""}&m=${activeMonth}`}>
               <Button className="w-full" size="sm">Add spend</Button>
@@ -627,14 +682,8 @@ export default function Statement() {
               <Button className="w-full" size="sm">Convert EMI</Button>
             </Link>
           </div>
-
-          {computed ? (
-            <div className="text-xs text-white/50">
-              Payments count if recorded between {computed.payStart} and {computed.dueDate}.
-            </div>
-          ) : null}
         </Card>
-      ) : null}
+      </div>
 
       <Card className="p-5 space-y-3">
         <div className="flex items-center justify-between gap-3">
@@ -651,60 +700,81 @@ export default function Statement() {
           {filteredTimeline.length} item{filteredTimeline.length === 1 ? "" : "s"} • {formatINR(filterTotal)}
         </div>
 
-        {filteredTimeline.length === 0 ? (
-          <div className="mt-3 space-y-3">
+        {groupedTimeline.length === 0 ? (
+          <div className="mt-2 space-y-2">
             <div className="text-sm text-white/70">Start this cycle</div>
             <div className="text-sm text-white/60">
               Add spends as they happen, then record payments anytime until the due date.
             </div>
           </div>
         ) : (
-          <div className="space-y-2">
-            {filteredTimeline.map((t) => {
-              const chip =
-                t.kind === "payment"
-                  ? <Badge tone={t.pending ? "warn" : "good"}>{t.pending ? "Pending" : "Payment"}</Badge>
-                  : t.kind === "spend"
-                  ? <Badge tone={t.pending ? "warn" : "neutral"}>{t.pending ? "Pending" : "Spend"}</Badge>
-                  : <Badge tone="warn">EMI</Badge>;
-
-              const amtTone = t.kind === "payment" ? "text-emerald-200" : "text-white";
-              const prefix = t.kind === "payment" ? "-" : "";
-
-              return (
-                <div key={t.id} className="rounded-3xl bg-black/30 border border-white/10 p-4">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        {chip}
-                        <div className="text-sm">{formatDateShort(t.date)}</div>
-                      </div>
-                      <div className="mt-2 text-base">{t.title}</div>
-                      {t.subtitle ? <div className="mt-1 text-xs text-white/60 truncate">{t.subtitle}</div> : null}
-                    </div>
-
-                    <div className="text-right">
-                      <div className={cx("text-sm font-semibold", amtTone)}>
-                        {prefix}{formatINR(t.amount)}
-                      </div>
-
-                      {t.kind === "spend" && t.spendId ? (
-                        <div className="mt-2 flex justify-end gap-2">
-                          <Link to={`/spends/${t.spendId}/edit?card=${card?.id ?? ""}&m=${activeMonth}`}>
-                            <Button size="sm" variant="ghost">Edit</Button>
-                          </Link>
-                          {!t.pending ? (
-                            <Button size="sm" variant="danger" onClick={() => void removeSpend(t)}>
-                              Delete
-                            </Button>
-                          ) : null}
-                        </div>
-                      ) : null}
-                    </div>
-                  </div>
+          <div className="space-y-4">
+            {groupedTimeline.map((group, groupIdx) => (
+              <div key={group.key} style={{ animation: `fadeUp 260ms ease both`, animationDelay: `${groupIdx * 50}ms` }}>
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <div className="text-sm text-white/70">{group.label}</div>
+                  <div className="text-xs text-white/45">{group.items.length} • {formatINR(group.total)}</div>
                 </div>
-              );
-            })}
+
+                <div className="space-y-2">
+                  {group.items.map((t) => {
+                    const chip =
+                      t.kind === "payment"
+                        ? <Badge tone={t.pending ? "warn" : "good"}>{t.pending ? "Pending" : "Payment"}</Badge>
+                        : t.kind === "spend"
+                        ? <Badge tone={t.pending ? "warn" : "neutral"}>{t.pending ? "Pending" : "Spend"}</Badge>
+                        : <Badge tone="warn">EMI</Badge>;
+
+                    const amtTone = t.kind === "payment" ? "text-emerald-200" : "text-white";
+                    const prefix = t.kind === "payment" ? "-" : "";
+
+                    const row = (
+                      <div className="rounded-3xl bg-black/30 border border-white/10 p-4">
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              {chip}
+                              <div className="text-sm">{formatDateShort(t.date)}</div>
+                            </div>
+                            <div className="mt-2 text-base">{t.title}</div>
+                            {t.subtitle ? <div className="mt-1 text-xs text-white/60 truncate">{t.subtitle}</div> : null}
+                          </div>
+
+                          <div className="text-right">
+                            <div className={cx("text-sm font-semibold", amtTone)}>
+                              {prefix}{formatINR(t.amount)}
+                            </div>
+
+                            {t.kind === "spend" && t.spendId ? (
+                              <div className="mt-2">
+                                <Link to={`/spends/${t.spendId}/edit?card=${card?.id ?? ""}&m=${activeMonth}`}>
+                                  <Button size="sm" variant="ghost">Edit</Button>
+                                </Link>
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+                    );
+
+                    if (t.kind === "spend" && t.spendId && !t.pending) {
+                      return (
+                        <SwipeRow
+                          key={t.id}
+                          actionLabel="Delete"
+                          tone="danger"
+                          onAction={() => void removeSpend(t)}
+                        >
+                          {row}
+                        </SwipeRow>
+                      );
+                    }
+
+                    return <div key={t.id}>{row}</div>;
+                  })}
+                </div>
+              </div>
+            ))}
           </div>
         )}
       </Card>

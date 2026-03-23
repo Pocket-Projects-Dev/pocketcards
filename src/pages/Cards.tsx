@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
-import { Card, ProgressBar, Button, Skeleton } from "../components/ui";
+import { Badge, Button, Card, RingMeter, Skeleton } from "../components/ui";
 import { formatINR } from "../lib/format";
+import AnimatedNumber from "../components/AnimatedNumber";
+import { getCardAccent } from "../lib/cardTheme";
 
 type CardRow = {
   id: string;
@@ -37,9 +39,8 @@ function CardsSkeleton() {
               <Skeleton className="h-5 w-3/4" />
               <Skeleton className="h-4 w-1/2" />
             </div>
-            <Skeleton className="h-9 w-14" />
+            <Skeleton className="h-20 w-20 rounded-full" />
           </div>
-          <Skeleton className="h-2 w-full rounded-full" />
           <Skeleton className="h-4 w-2/3" />
         </Card>
       ))}
@@ -65,7 +66,6 @@ export default function Cards() {
       const { data: c, error: ce } = await supabase
         .from("cards")
         .select("id,name,issuer,last4,credit_limit")
-        .is("archived_at", null)
         .order("created_at", { ascending: false });
 
       if (!alive) return;
@@ -111,12 +111,11 @@ export default function Cards() {
       <div className="flex items-end justify-between">
         <div>
           <div className="text-2xl font-semibold tracking-tight">Cards</div>
-          <div className="mt-1 text-sm text-white/60">Limits + statements</div>
+          <div className="mt-1 text-sm text-white/60">Distinct cards, clearer limits, faster decisions</div>
         </div>
-        <div className="flex items-center gap-2">
-          <Link to="/settings"><Button variant="ghost" size="sm">Settings</Button></Link>
-          <Link to="/cards/new"><Button variant="primary" size="sm">Add card</Button></Link>
-        </div>
+        <Link to="/cards/new">
+          <Button variant="primary" size="sm">Add card</Button>
+        </Link>
       </div>
 
       {err ? <Card className="p-4 text-sm text-red-300">{err}</Card> : null}
@@ -129,55 +128,82 @@ export default function Cards() {
           </div>
           <div className="grid grid-cols-2 gap-2">
             <Link to="/cards/new"><Button className="w-full" variant="primary">Add card</Button></Link>
-            <Link to="/settings"><Button className="w-full">Settings</Button></Link>
+            <Link to="/"><Button className="w-full">Go to dashboard</Button></Link>
           </div>
         </Card>
       ) : (
         <div className="space-y-3">
-          {cards.map((c) => {
+          {cards.map((c, idx) => {
             const s = summaryById.get(c.id);
             const used = Number(s?.remaining_due || 0);
             const limit = Number(c.credit_limit || 0);
             const left = Math.max(0, limit - used);
             const pct = limit > 0 ? Math.max(0, Math.min(1, used / limit)) : 0;
+            const accent = getCardAccent(c.name, c.issuer);
 
             return (
               <Card
                 key={c.id}
-                className="p-5 cursor-pointer hover:bg-white/[0.06] transition"
+                className="p-5 cursor-pointer transition hover:bg-white/[0.06]"
                 onClick={() => nav(`/cards/${c.id}/statement`)}
+                style={{
+                  animation: `fadeUp 260ms ease both`,
+                  animationDelay: `${idx * 45}ms`,
+                  boxShadow: `0 18px 45px ${accent.glow}`,
+                }}
               >
-                <div className="flex items-start justify-between gap-4">
+                <div className="mb-4 h-1.5 rounded-full" style={{ background: `linear-gradient(90deg, ${accent.from}, ${accent.to})` }} />
+
+                <div className="grid grid-cols-[1fr_auto] gap-4 items-start">
                   <div className="min-w-0">
-                    <div className="text-base font-medium">
-                      {c.name}{c.last4 ? ` •••• ${c.last4}` : ""}
+                    <div className="flex items-center gap-2">
+                      <div className="text-base font-medium">
+                        {c.name}{c.last4 ? ` •••• ${c.last4}` : ""}
+                      </div>
+                      {typeof s?.days_to_due === "number" && s.days_to_due <= 3 ? <Badge tone="danger">Soon</Badge> : null}
                     </div>
+
                     <div className="mt-1 text-sm text-white/60">
-                      Next due {s?.due_date ? s.due_date : "—"}{typeof s?.days_to_due === "number" ? ` • ${s.days_to_due} days` : ""}
+                      {c.issuer || "Card"} • {s?.due_date ? `Next due ${s.due_date}` : "No active due"}
+                      {typeof s?.days_to_due === "number" ? ` • ${s.days_to_due} days` : ""}
                     </div>
+
+                    {limit > 0 ? (
+                      <div className="mt-4 grid grid-cols-2 gap-4">
+                        <div>
+                          <div className="text-xs text-white/50">Limit left</div>
+                          <div className="mt-1 text-xl font-semibold">
+                            <AnimatedNumber value={left} formatter={(n) => formatINR(n)} />
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-white/50">Limit used</div>
+                          <div className="mt-1 text-xl font-semibold">
+                            <AnimatedNumber value={used} formatter={(n) => formatINR(n)} />
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="mt-4 text-xs text-white/60">Set a credit limit in Edit.</div>
+                    )}
                   </div>
 
-                  <div onClick={(e) => e.stopPropagation()}>
+                  <div className="flex flex-col items-end gap-3" onClick={(e) => e.stopPropagation()}>
+                    {limit > 0 ? (
+                      <RingMeter
+                        value={pct}
+                        from={accent.from}
+                        to={accent.to}
+                        label={`${Math.round(pct * 100)}%`}
+                        sublabel="used"
+                      />
+                    ) : null}
+
                     <Link to={`/cards/${c.id}/edit`}>
                       <Button variant="ghost" size="sm">Edit</Button>
                     </Link>
                   </div>
                 </div>
-
-                {limit > 0 ? (
-                  <div className="mt-4 space-y-2">
-                    <div className="flex items-center justify-between text-xs text-white/60">
-                      <span>Limit left</span>
-                      <span>{formatINR(left)} / {formatINR(limit)}</span>
-                    </div>
-                    <ProgressBar value={pct} />
-                    <div className="text-xs text-white/60">
-                      Limit used: {formatINR(used)} / {formatINR(limit)}
-                    </div>
-                  </div>
-                ) : (
-                  <div className="mt-4 text-xs text-white/60">Set a credit limit in Edit.</div>
-                )}
               </Card>
             );
           })}
