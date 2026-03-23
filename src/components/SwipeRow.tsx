@@ -16,7 +16,7 @@ export default function SwipeRow(props: {
     onAction,
     tone = "danger",
     disabled = false,
-    actionWidth = 92,
+    actionWidth = 96,
     className,
   } = props;
 
@@ -26,8 +26,15 @@ export default function SwipeRow(props: {
 
   const clamp = (n: number) => Math.max(-actionWidth, Math.min(0, n));
 
+  const isInteractiveTarget = (target: EventTarget | null) => {
+    if (!(target instanceof HTMLElement)) return false;
+    return Boolean(target.closest("button,a,input,select,textarea,label"));
+  };
+
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (disabled) return;
+    if (isInteractiveTarget(e.target)) return;
+
     startX.current = e.clientX;
     setDragging(true);
     e.currentTarget.setPointerCapture?.(e.pointerId);
@@ -41,28 +48,40 @@ export default function SwipeRow(props: {
 
   const settle = () => {
     setDragging(false);
-    setDx((prev) => (prev < -actionWidth * 0.4 ? -actionWidth : 0));
+    setDx((prev) => (prev < -actionWidth * 0.45 ? -actionWidth : 0));
     startX.current = null;
   };
 
   const onPointerUp = () => settle();
   const onPointerCancel = () => settle();
 
+  const showAction = dx < -8;
+
   return (
     <div className={cx("relative overflow-hidden rounded-3xl", className)}>
       <div className="absolute inset-y-0 right-0 flex items-center pr-2">
-        <Button
-          variant={tone === "danger" ? "danger" : tone === "good" ? "primary" : "secondary"}
-          size="sm"
-          onClick={() => void onAction()}
-          className="h-[84%] min-w-[84px]"
+        <div
+          className={cx(
+            "transition-opacity duration-150",
+            showAction ? "opacity-100" : "opacity-0"
+          )}
         >
-          {actionLabel}
-        </Button>
+          <Button
+            variant={tone === "danger" ? "danger" : tone === "good" ? "primary" : "secondary"}
+            size="sm"
+            onClick={() => void onAction()}
+            className="h-[84px] min-w-[88px]"
+          >
+            {actionLabel}
+          </Button>
+        </div>
       </div>
 
       <div
-        className="touch-pan-y transition-transform duration-200 ease-out"
+        className={cx(
+          "relative z-10 w-full touch-pan-y",
+          dragging ? "" : "transition-transform duration-200 ease-out"
+        )}
         style={{ transform: `translateX(${dx}px)` }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}

@@ -729,33 +729,35 @@ export default function Statement() {
                     const prefix = t.kind === "payment" ? "-" : "";
 
                     const row = (
-                      <div className="rounded-3xl bg-black/30 border border-white/10 p-4">
-                        <div className="flex items-start justify-between gap-4">
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2">
-                              {chip}
-                              <div className="text-sm">{formatDateShort(t.date)}</div>
-                            </div>
-                            <div className="mt-2 text-base">{t.title}</div>
-                            {t.subtitle ? <div className="mt-1 text-xs text-white/60 truncate">{t.subtitle}</div> : null}
-                          </div>
+  <div className="rounded-3xl bg-[#0b0b10] border border-white/10 p-4">
+    <div className="flex items-start justify-between gap-4">
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          {chip}
+          <div className="text-sm">{formatDateShort(t.date)}</div>
+        </div>
+        <div className="mt-2 text-base">{t.title}</div>
+        {t.subtitle ? <div className="mt-1 text-xs text-white/60 truncate">{t.subtitle}</div> : null}
+      </div>
 
-                          <div className="text-right">
-                            <div className={cx("text-sm font-semibold", amtTone)}>
-                              {prefix}{formatINR(t.amount)}
-                            </div>
+      <div className="shrink-0 text-right">
+        <div className={cx("text-lg font-semibold tracking-tight", amtTone)}>
+          {prefix}{formatINR(t.amount)}
+        </div>
+      </div>
+    </div>
 
-                            {t.kind === "spend" && t.spendId ? (
-                              <div className="mt-2">
-                                <Link to={`/spends/${t.spendId}/edit?card=${card?.id ?? ""}&m=${activeMonth}`}>
-                                  <Button size="sm" variant="ghost">Edit</Button>
-                                </Link>
-                              </div>
-                            ) : null}
-                          </div>
-                        </div>
-                      </div>
-                    );
+    {t.kind === "spend" && t.spendId ? (
+      <div className="mt-3 flex items-center justify-between gap-3">
+        <div className="text-[11px] text-white/40">Swipe left to delete</div>
+
+        <Link to={`/spends/${t.spendId}/edit?card=${card?.id ?? ""}&m=${activeMonth}`}>
+          <Button size="sm" variant="secondary">Edit</Button>
+        </Link>
+      </div>
+    ) : null}
+  </div>
+);
 
                     if (t.kind === "spend" && t.spendId && !t.pending) {
                       return (
