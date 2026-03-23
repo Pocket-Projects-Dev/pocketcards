@@ -4,6 +4,8 @@ import { supabase } from "../lib/supabase";
 import { Badge, Button, Card, Input, ProgressBar, Skeleton, cx } from "../components/ui";
 import { formatDateShort, formatINR } from "../lib/format";
 import { cacheGet, cacheSet } from "../lib/cache";
+import { computeCycleWindow, daysUntilISO, getCurrentCycleMonth, isoDate } from "../lib/statement";
+import { getPendingActions, onQueueChange, type PendingAction } from "../lib/offlineQueue";
 
 type CardRow = {
   id: string;
@@ -15,14 +17,12 @@ type CardRow = {
   credit_limit: number | null;
 };
 
-type SpendRow = { id: string; date: string; amount: number; note: string | null };
-
-type PlanRow = {
+type SpendRow = {
   id: string;
-  principal: number;
-  monthly_emi: number;
-  purchase_date: string | null;
-  statement_month: string | null;
+  date: string;
+  amount: number;
+  note: string | null;
+  pending?: boolean;
 };
 
 type InstRow = {
@@ -39,13 +39,13 @@ type PayRow = {
   paid_on: string | null;
   paid_at: string | null;
   created_at: string;
+  pending?: boolean;
 };
 
 type StatementCache = {
   spends: SpendRow[];
   payments: PayRow[];
   installments: InstRow[];
-  plansThisMonth: PlanRow[];
   fetchedAt: string;
 };
 
@@ -60,52 +60,11 @@ function extractMissingColumn(err: any) {
   return null;
 }
 
-function pad2(n: number) {
-  return String(n).padStart(2, "0");
-}
-function daysInMonth(y: number, m: number) {
-  return new Date(Date.UTC(y, m, 0)).getUTCDate();
-}
-function makeDate(y: number, m: number, d: number) {
-  const last = daysInMonth(y, m);
-  const dd = Math.min(d, last);
-  return `${y}-${pad2(m)}-${pad2(dd)}`;
-}
-function addDays(iso: string, delta: number) {
-  const t = new Date(`${iso}T00:00:00.000Z`).getTime() + delta * 86400000;
-  const d = new Date(t);
-  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
-}
-function ymNow() {
-  const d = new Date();
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
-}
-function isoDate(v: any) {
-  if (!v) return "";
-  const s = String(v);
-  return s.includes("T") ? s.slice(0, 10) : s.slice(0, 10);
-}
 function dateFromPayment(p: PayRow) {
   if (p.paid_on) return p.paid_on;
   if (p.paid_at) return isoDate(p.paid_at);
   return isoDate(p.created_at);
 }
-function daysUntilISO(targetISO: string) {
-  const now = new Date();
-  const base = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
-  const t = new Date(`${targetISO}T00:00:00.000Z`);
-  const diff = t.getTime() - base.getTime();
-  return Math.ceil(diff / 86400000);
-}
-
-type TLItem = {
-  id: string;
-  date: string;
-  kind: "spend" | "payment" | "emi_due" | "emi_convert";
-  title: string;
-  subtitle?: string;
-  amount: number;
-};
 
 function StatementSkeleton() {
   return (
@@ -119,13 +78,13 @@ function StatementSkeleton() {
       </div>
 
       <Card className="p-5 space-y-3">
-        <Skeleton className="h-4 w-28" />
+        <Skeleton className="h-4 w-36" />
         <Skeleton className="h-11 w-full" />
       </Card>
 
       <Card className="p-5 space-y-3">
-        <Skeleton className="h-4 w-24" />
-        <Skeleton className="h-9 w-40" />
+        <Skeleton className="h-4 w-20" />
+        <Skeleton className="h-10 w-40" />
         <Skeleton className="h-2 w-full rounded-full" />
         <div className="grid grid-cols-3 gap-2">
           <Skeleton className="h-10 w-full" />
@@ -143,6 +102,17 @@ function StatementSkeleton() {
   );
 }
 
+type TLItem = {
+  id: string;
+  date: string;
+  kind: "spend" | "payment" | "emi_due";
+  title: string;
+  subtitle?: string;
+  amount: number;
+  spendId?: string;
+  pending?: boolean;
+};
+
 export default function Statement() {
   const { cardId } = useParams();
   const id = cardId ?? "";
@@ -152,46 +122,39 @@ export default function Statement() {
   const qs = useMemo(() => new URLSearchParams(location.search), [location.search]);
   const qsMonth = qs.get("m") || "";
 
-  const [month, setMonth] = useState(qsMonth || ymNow());
+  const [month, setMonth] = useState(qsMonth || "");
   const [card, setCard] = useState<CardRow | null>(null);
 
   const [spends, setSpends] = useState<SpendRow[]>([]);
-  const [plansThisMonth, setPlansThisMonth] = useState<PlanRow[]>([]);
   const [installments, setInstallments] = useState<InstRow[]>([]);
   const [payments, setPayments] = useState<PayRow[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [queueTick, setQueueTick] = useState(0);
+
+  const activeMonth = useMemo(() => {
+    if (qsMonth) return qsMonth;
+    if (month) return month;
+    if (card) return getCurrentCycleMonth(card.close_day);
+    return "";
+  }, [qsMonth, month, card]);
 
   const cardKey = useMemo(() => `card:${id}`, [id]);
-  const stmtKey = useMemo(() => `stmt:${id}:${month}`, [id, month]);
-
-  useEffect(() => {
-    if (qsMonth && qsMonth !== month) setMonth(qsMonth);
-  }, [qsMonth]);
+  const stmtKey = useMemo(() => (activeMonth ? `stmt:${id}:${activeMonth}` : ""), [id, activeMonth]);
 
   const computed = useMemo(() => {
-    if (!card) return null;
+    if (!card || !activeMonth) return null;
+    return computeCycleWindow(activeMonth, card.close_day, card.due_day);
+  }, [card, activeMonth]);
 
-    const [yy, mm] = month.split("-").map(Number);
-    const closeDate = makeDate(yy, mm, card.close_day);
+  const pendingActions = useMemo(() => getPendingActions(), [queueTick]);
 
-    const prevY = mm === 1 ? yy - 1 : yy;
-    const prevM = mm === 1 ? 12 : mm - 1;
-    const prevClose = makeDate(prevY, prevM, card.close_day);
-
-    const cycleStart = addDays(prevClose, 1);
-    const cycleEnd = closeDate;
-
-    const dueSameMonth = card.due_day > card.close_day;
-    const dueY = dueSameMonth ? yy : mm === 12 ? yy + 1 : yy;
-    const dueM = dueSameMonth ? mm : mm === 12 ? 1 : mm + 1;
-    const dueDate = makeDate(dueY, dueM, card.due_day);
-
-    const payStart = cycleStart;
-    return { cycleStart, cycleEnd, dueDate, payStart };
-  }, [card, month]);
+  useEffect(() => {
+    const unsub = onQueueChange(() => setQueueTick((x) => x + 1));
+    return () => unsub();
+  }, []);
 
   useEffect(() => {
     if (!id) return;
@@ -199,12 +162,45 @@ export default function Statement() {
     const cachedCard = cacheGet<CardRow>(cardKey);
     if (cachedCard) setCard(cachedCard);
 
+    let alive = true;
+
+    (async () => {
+      const { data: c, error: ce } = await supabase
+        .from("cards")
+        .select("id,name,last4,issuer,close_day,due_day,credit_limit")
+        .eq("id", id)
+        .single();
+
+      if (!alive) return;
+
+      if (ce) {
+        setErr(ce.message);
+        setLoading(false);
+        return;
+      }
+
+      const cardRow = c as unknown as CardRow;
+      setCard(cardRow);
+      cacheSet(cardKey, cardRow, 10 * 60 * 1000);
+
+      if (!qsMonth && !month) {
+        setMonth(getCurrentCycleMonth(cardRow.close_day));
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, [id, qsMonth, month, cardKey]);
+
+  useEffect(() => {
+    if (!card || !computed || !stmtKey) return;
+
     const cachedStmt = cacheGet<StatementCache>(stmtKey);
     if (cachedStmt) {
       setSpends(cachedStmt.spends);
       setPayments(cachedStmt.payments);
       setInstallments(cachedStmt.installments);
-      setPlansThisMonth(cachedStmt.plansThisMonth);
       setLoading(false);
       setRefreshing(true);
     } else {
@@ -217,38 +213,6 @@ export default function Statement() {
       setErr(null);
       setRefreshing(true);
 
-      const { data: c, error: ce } = await supabase
-        .from("cards")
-        .select("id,name,last4,issuer,close_day,due_day,credit_limit")
-        .eq("id", id)
-        .single();
-
-      if (!alive) return;
-
-      if (ce) {
-        setErr(ce.message);
-        setRefreshing(false);
-        setLoading(false);
-        return;
-      }
-
-      const cardRow = c as unknown as CardRow;
-      setCard(cardRow);
-      cacheSet(cardKey, cardRow, 10 * 60 * 1000);
-
-      const [yy, mm] = month.split("-").map(Number);
-      const closeDate = makeDate(yy, mm, cardRow.close_day);
-      const prevY = mm === 1 ? yy - 1 : yy;
-      const prevM = mm === 1 ? 12 : mm - 1;
-      const prevClose = makeDate(prevY, prevM, cardRow.close_day);
-      const cycleStart = addDays(prevClose, 1);
-      const cycleEnd = closeDate;
-
-      const dueSameMonth = cardRow.due_day > cardRow.close_day;
-      const dueY = dueSameMonth ? yy : mm === 12 ? yy + 1 : yy;
-      const dueM = dueSameMonth ? mm : mm === 12 ? 1 : mm + 1;
-      const dueDate = makeDate(dueY, dueM, cardRow.due_day);
-
       const dateFields = ["txn_date", "spent_on", "spent_at", "transaction_date", "date", "created_at"];
       let txRows: any[] = [];
       let usedField: string | null = null;
@@ -257,10 +221,10 @@ export default function Statement() {
         const { data, error } = await supabase
           .from("transactions")
           .select("*")
-          .eq("card_id", cardRow.id)
+          .eq("card_id", card.id)
           .eq("is_emi", false)
-          .gte(f, cycleStart)
-          .lte(f, cycleEnd)
+          .gte(f, computed.cycleStart)
+          .lte(f, computed.cycleEnd)
           .order(f, { ascending: false });
 
         if (!alive) return;
@@ -290,7 +254,7 @@ export default function Statement() {
       const { data: allPlans, error: ape } = await supabase
         .from("emi_plans")
         .select("id")
-        .eq("card_id", cardRow.id);
+        .eq("card_id", card.id);
 
       if (!alive) return;
       if (ape) {
@@ -308,7 +272,7 @@ export default function Statement() {
           .from("emi_installments")
           .select("id,emi_plan_id,due_date,amount,paid_at")
           .in("emi_plan_id", planIds)
-          .eq("due_date", dueDate);
+          .eq("due_date", computed.dueDate);
 
         if (!alive) return;
         if (ie) {
@@ -330,7 +294,7 @@ export default function Statement() {
       const { data: pay, error: pae } = await supabase
         .from("payments")
         .select("*")
-        .eq("card_id", cardRow.id)
+        .eq("card_id", card.id)
         .order("created_at", { ascending: false })
         .limit(200);
 
@@ -350,38 +314,9 @@ export default function Statement() {
         created_at: String(r.created_at),
       }));
 
-      let plansNext: PlanRow[] = [];
-      const { data: p, error: pe } = await supabase
-        .from("emi_plans")
-        .select("id,principal,monthly_emi,purchase_date,statement_month")
-        .eq("card_id", cardRow.id)
-        .eq("statement_month", month)
-        .order("created_at", { ascending: false });
-
-      if (!alive) return;
-
-      if (pe) {
-        const missing = extractMissingColumn(pe);
-        if (missing !== "statement_month" && missing !== "purchase_date") {
-          setErr(pe.message);
-          setRefreshing(false);
-          setLoading(false);
-          return;
-        }
-      } else {
-        plansNext = ((((p as unknown) as any[]) ?? []) as any[]).map((r) => ({
-          id: String(r.id),
-          principal: Number(r.principal || 0),
-          monthly_emi: Number(r.monthly_emi || 0),
-          purchase_date: r.purchase_date ? String(r.purchase_date) : null,
-          statement_month: r.statement_month ? String(r.statement_month) : null,
-        }));
-      }
-
       setSpends(spendsNext);
       setInstallments(installmentsNext);
       setPayments(paymentsNext);
-      setPlansThisMonth(plansNext);
 
       cacheSet(
         stmtKey,
@@ -389,7 +324,6 @@ export default function Statement() {
           spends: spendsNext,
           payments: paymentsNext,
           installments: installmentsNext,
-          plansThisMonth: plansNext,
           fetchedAt: new Date().toISOString(),
         },
         2 * 60 * 1000
@@ -402,16 +336,89 @@ export default function Statement() {
     return () => {
       alive = false;
     };
-  }, [id, month, cardKey, stmtKey]);
+  }, [card, computed, stmtKey]);
+
+  const displaySpends = useMemo(() => {
+    if (!card || !computed) return spends;
+
+    let next = [...spends];
+
+    const relevant = pendingActions.filter(
+      (a) =>
+        (a.type === "create_spend" || a.type === "update_spend" || a.type === "delete_spend") &&
+        a.payload.cardId === card.id
+    );
+
+    for (const a of relevant) {
+      if (a.type === "create_spend") {
+        if (a.payload.date >= computed.cycleStart && a.payload.date <= computed.cycleEnd) {
+          next.unshift({
+            id: `pending_${a.id}`,
+            date: a.payload.date,
+            amount: a.payload.amount,
+            note: a.payload.note || "Pending sync",
+            pending: true,
+          });
+        }
+      }
+
+      if (a.type === "update_spend") {
+        next = next.map((s) =>
+          s.id === a.payload.spendId
+            ? {
+                ...s,
+                date: a.payload.date,
+                amount: a.payload.amount,
+                note: a.payload.note || null,
+                pending: true,
+              }
+            : s
+        );
+      }
+
+      if (a.type === "delete_spend") {
+        next = next.filter((s) => s.id !== a.payload.spendId);
+      }
+    }
+
+    next = next.filter((s) => s.date >= computed.cycleStart && s.date <= computed.cycleEnd);
+    next.sort((a, b) => b.date.localeCompare(a.date));
+    return next;
+  }, [spends, pendingActions, card, computed]);
+
+  const displayPayments = useMemo(() => {
+    if (!card || !computed) return payments;
+
+    let next = [...payments];
+
+    const relevant = pendingActions.filter(
+      (a) => a.type === "create_payment" && a.payload.cardId === card.id
+    ) as Extract<PendingAction, { type: "create_payment" }>[];
+
+    for (const a of relevant) {
+      if (a.payload.paidOn >= computed.payStart && a.payload.paidOn <= computed.dueDate) {
+        next.unshift({
+          id: `pending_${a.id}`,
+          amount: a.payload.amount,
+          paid_on: a.payload.paidOn,
+          paid_at: null,
+          created_at: a.createdAt,
+          pending: true,
+        });
+      }
+    }
+
+    return next;
+  }, [payments, pendingActions, card, computed]);
 
   const totals = useMemo(() => {
     if (!computed) return null;
 
-    const spendTotal = spends.reduce((s, x) => s + Number(x.amount || 0), 0);
+    const spendTotal = displaySpends.reduce((s, x) => s + Number(x.amount || 0), 0);
     const emiTotal = installments.reduce((s, x) => s + Number(x.amount || 0), 0);
     const totalDue = spendTotal + emiTotal;
 
-    const paidTotal = payments
+    const paidTotal = displayPayments
       .filter((p) => {
         const d = dateFromPayment(p);
         return d >= computed.payStart && d <= computed.dueDate;
@@ -420,7 +427,7 @@ export default function Statement() {
 
     const remaining = Math.max(0, totalDue - paidTotal);
     return { spendTotal, emiTotal, totalDue, paidTotal, remaining };
-  }, [computed, spends, installments, payments]);
+  }, [computed, displaySpends, installments, displayPayments]);
 
   const payRemaining = totals ? Math.ceil(Number(totals.remaining || 0)) : 0;
   const progress = totals && totals.totalDue > 0 ? Math.max(0, Math.min(1, totals.paidTotal / totals.totalDue)) : 0;
@@ -433,18 +440,20 @@ export default function Statement() {
 
     const items: TLItem[] = [];
 
-    for (const s of spends) {
+    for (const s of displaySpends) {
       items.push({
         id: `sp_${s.id}`,
         date: s.date,
         kind: "spend",
         title: "Spend",
-        subtitle: s.note || undefined,
+        subtitle: s.pending ? `${s.note || ""}${s.note ? " • " : ""}Pending sync` : s.note || undefined,
         amount: Number(s.amount || 0),
+        spendId: s.id.startsWith("pending_") ? undefined : s.id,
+        pending: s.pending,
       });
     }
 
-    for (const p of payments) {
+    for (const p of displayPayments) {
       const d = dateFromPayment(p);
       if (d < computed.payStart || d > computed.dueDate) continue;
       items.push({
@@ -452,7 +461,9 @@ export default function Statement() {
         date: d,
         kind: "payment",
         title: "Payment recorded",
+        subtitle: p.pending ? "Pending sync" : undefined,
         amount: Number(p.amount || 0),
+        pending: p.pending,
       });
     }
 
@@ -467,23 +478,11 @@ export default function Statement() {
       });
     }
 
-    for (const p of plansThisMonth) {
-      const d = p.purchase_date || computed.cycleStart;
-      items.push({
-        id: `conv_${p.id}`,
-        date: d,
-        kind: "emi_convert",
-        title: "Converted to EMI",
-        subtitle: p.purchase_date ? `Purchase ${formatDateShort(p.purchase_date)}` : undefined,
-        amount: Number(p.principal || 0),
-      });
-    }
-
     items.sort((a, b) => (a.date === b.date ? a.kind.localeCompare(b.kind) : b.date.localeCompare(a.date)));
     return items;
-  }, [computed, spends, payments, installments, plansThisMonth]);
+  }, [computed, displaySpends, displayPayments, installments]);
 
-  if (loading && !card) return <StatementSkeleton />;
+  if ((loading && !card) || !activeMonth) return <StatementSkeleton />;
 
   const onMonthChange = (m: string) => {
     setMonth(m);
@@ -510,8 +509,8 @@ export default function Statement() {
       {err ? <Card className="p-4 text-sm text-red-300">{err}</Card> : null}
 
       <Card className="p-5 space-y-3">
-        <div className="text-xs text-white/60">Statement month</div>
-        <Input type="month" value={month} onChange={(e) => onMonthChange(e.target.value)} />
+        <div className="text-xs text-white/60">Cycle ending month</div>
+        <Input type="month" value={activeMonth} onChange={(e) => onMonthChange(e.target.value)} />
       </Card>
 
       {totals ? (
@@ -535,19 +534,19 @@ export default function Statement() {
           <ProgressBar value={progress} />
 
           <div className="grid grid-cols-3 gap-2">
-            <Link to={`/add/spend?card=${card?.id ?? ""}&m=${month}`}>
+            <Link to={`/add/spend?card=${card?.id ?? ""}&m=${activeMonth}`}>
               <Button className="w-full" size="sm">Add spend</Button>
             </Link>
 
             {payRemaining > 0 ? (
-              <Link to={`/add/payment?card=${card?.id ?? ""}&m=${month}&amount=${payRemaining}&max=${payRemaining}&withdraw=1`}>
+              <Link to={`/add/payment?card=${card?.id ?? ""}&m=${activeMonth}&amount=${payRemaining}&max=${payRemaining}&withdraw=1`}>
                 <Button className="w-full" size="sm" variant="primary">Pay remaining</Button>
               </Link>
             ) : (
               <Button className="w-full" size="sm" disabled variant="primary">Paid</Button>
             )}
 
-            <Link to={`/add/emi?card=${card?.id ?? ""}&m=${month}`}>
+            <Link to={`/add/emi?card=${card?.id ?? ""}&m=${activeMonth}`}>
               <Button className="w-full" size="sm">Convert EMI</Button>
             </Link>
           </div>
@@ -565,18 +564,18 @@ export default function Statement() {
 
         {timeline.length === 0 ? (
           <div className="mt-3 space-y-3">
-            <div className="text-sm text-white/70">Start your statement</div>
+            <div className="text-sm text-white/70">Start this cycle</div>
             <div className="text-sm text-white/60">
-              Add spends as they happen, then record payments anytime during the cycle until the due date.
+              Add spends as they happen, then record payments anytime until the due date.
             </div>
             <div className="grid grid-cols-3 gap-2">
-              <Link to={`/add/spend?card=${card?.id ?? ""}&m=${month}`}>
+              <Link to={`/add/spend?card=${card?.id ?? ""}&m=${activeMonth}`}>
                 <Button className="w-full" size="sm">Add spend</Button>
               </Link>
-              <Link to={`/add/payment?card=${card?.id ?? ""}&m=${month}`}>
+              <Link to={`/add/payment?card=${card?.id ?? ""}&m=${activeMonth}`}>
                 <Button className="w-full" size="sm" variant="primary">Add payment</Button>
               </Link>
-              <Link to={`/add/emi?card=${card?.id ?? ""}&m=${month}`}>
+              <Link to={`/add/emi?card=${card?.id ?? ""}&m=${activeMonth}`}>
                 <Button className="w-full" size="sm">Convert EMI</Button>
               </Link>
             </div>
@@ -586,16 +585,12 @@ export default function Statement() {
             {timeline.map((t) => {
               const chip =
                 t.kind === "payment"
-                  ? <Badge tone="good">Payment</Badge>
+                  ? <Badge tone={t.pending ? "warn" : "good"}>{t.pending ? "Pending" : "Payment"}</Badge>
                   : t.kind === "spend"
-                  ? <Badge>Spend</Badge>
-                  : t.kind === "emi_due"
-                  ? <Badge tone="warn">EMI</Badge>
-                  : <Badge>Conversion</Badge>;
+                  ? <Badge tone={t.pending ? "warn" : "neutral"}>{t.pending ? "Pending" : "Spend"}</Badge>
+                  : <Badge tone="warn">EMI</Badge>;
 
-              const amtTone =
-                t.kind === "payment" ? "text-emerald-200" : "text-white";
-
+              const amtTone = t.kind === "payment" ? "text-emerald-200" : "text-white";
               const prefix = t.kind === "payment" ? "-" : "";
 
               return (
@@ -610,8 +605,16 @@ export default function Statement() {
                       {t.subtitle ? <div className="mt-1 text-xs text-white/60 truncate">{t.subtitle}</div> : null}
                     </div>
 
-                    <div className={cx("text-right text-sm font-semibold", amtTone)}>
-                      {prefix}{formatINR(t.amount)}
+                    <div className="text-right">
+                      <div className={cx("text-sm font-semibold", amtTone)}>
+                        {prefix}{formatINR(t.amount)}
+                      </div>
+
+                      {t.kind === "spend" && t.spendId ? (
+                        <Link to={`/spends/${t.spendId}/edit?card=${card?.id ?? ""}&m=${activeMonth}`}>
+                          <Button size="sm" variant="ghost" className="mt-2">Edit</Button>
+                        </Link>
+                      ) : null}
                     </div>
                   </div>
                 </div>

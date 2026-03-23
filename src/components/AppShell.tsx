@@ -1,6 +1,8 @@
+import { useEffect, useMemo, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
-import ToastHost from "./ToastHost";
-import { cx } from "./ui";
+import ToastHost, { toast } from "./ToastHost";
+import { Badge, Button, Card, cx } from "./ui";
+import { getPendingCount, onQueueChange, syncPendingQueue } from "../lib/offlineQueue";
 
 function TabLink(props: { to: string; label: string; end?: boolean }) {
   return (
@@ -22,6 +24,86 @@ function TabLink(props: { to: string; label: string; end?: boolean }) {
 }
 
 export default function AppShell() {
+  const [isOnline, setIsOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
+  const [pending, setPending] = useState(getPendingCount());
+  const [syncing, setSyncing] = useState(false);
+
+  const banner = useMemo(() => {
+    if (!isOnline) {
+      return {
+        tone: "warn" as const,
+        text: pending > 0
+          ? `${pending} change${pending === 1 ? "" : "s"} queued. They’ll sync when you’re online.`
+          : "You’re offline. New spends and payments will queue locally.",
+      };
+    }
+
+    if (syncing) {
+      return {
+        tone: "neutral" as const,
+        text: `Syncing ${pending} queued change${pending === 1 ? "" : "s"}…`,
+      };
+    }
+
+    if (pending > 0) {
+      return {
+        tone: "good" as const,
+        text: `${pending} queued change${pending === 1 ? "" : "s"} ready to sync.`,
+      };
+    }
+
+    return null;
+  }, [isOnline, pending, syncing]);
+
+  const runSync = async () => {
+    if (!navigator.onLine || syncing || getPendingCount() === 0) return;
+
+    setSyncing(true);
+    const result = await syncPendingQueue();
+    setPending(result.pending);
+    setSyncing(false);
+
+    if (result.synced > 0) {
+      toast(`Synced ${result.synced} queued change${result.synced === 1 ? "" : "s"}`, "success");
+    }
+  };
+
+  useEffect(() => {
+    const updateOnline = () => setIsOnline(navigator.onLine);
+    const updateQueue = () => setPending(getPendingCount());
+
+    window.addEventListener("online", updateOnline);
+    window.addEventListener("offline", updateOnline);
+
+    const unsub = onQueueChange(updateQueue);
+
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        updateOnline();
+        updateQueue();
+        void runSync();
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisible);
+
+    const timer = window.setInterval(() => {
+      updateQueue();
+      void runSync();
+    }, 15000);
+
+    updateQueue();
+    void runSync();
+
+    return () => {
+      window.removeEventListener("online", updateOnline);
+      window.removeEventListener("offline", updateOnline);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.clearInterval(timer);
+      unsub();
+    };
+  }, [syncing]);
+
   return (
     <div className="min-h-screen text-white">
       <ToastHost />
@@ -34,6 +116,25 @@ export default function AppShell() {
       </div>
 
       <div className="mx-auto max-w-md pb-[calc(112px+env(safe-area-inset-bottom))]">
+        {banner ? (
+          <div className="sticky top-0 z-30 px-4 pt-3">
+            <Card className="p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0 text-sm text-white/80">{banner.text}</div>
+                <div className="flex items-center gap-2">
+                  {banner.tone === "warn" ? <Badge tone="warn">Offline</Badge> : null}
+                  {banner.tone === "good" ? <Badge tone="good">Queued</Badge> : null}
+                  {isOnline && pending > 0 ? (
+                    <Button size="sm" variant="secondary" onClick={() => void runSync()} disabled={syncing}>
+                      {syncing ? "Syncing…" : "Sync now"}
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+            </Card>
+          </div>
+        ) : null}
+
         <Outlet />
       </div>
 
