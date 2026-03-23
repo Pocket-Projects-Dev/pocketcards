@@ -192,10 +192,10 @@ export default function Statement() {
 
     (async () => {
       const { data: c, error: ce } = await supabase
-        .from("cards")
-        .select("id,name,last4,issuer,close_day,due_day,credit_limit,archived_at")
-        .eq("id", id)
-        .single();
+      .from("cards")
+      .select("id,name,last4,issuer,close_day,due_day,credit_limit")
+      .eq("id", id)
+      .single();
 
       if (!alive) return;
 
@@ -835,7 +835,15 @@ export default function Statement() {
     toast(result.error, "error");
   };
 
-  if ((loading && !card) || !activeMonth) return <StatementSkeleton />;
+if (err && !card) {
+  return (
+    <div className="p-4 text-white">
+      <Card className="p-4 text-sm text-red-300">{err}</Card>
+    </div>
+  );
+}
+
+if ((loading && !card) || !activeMonth) return <StatementSkeleton />;
 
   const onMonthChange = (m: string) => {
     setMonth(m);
