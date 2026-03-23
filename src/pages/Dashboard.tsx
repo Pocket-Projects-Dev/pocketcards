@@ -3,7 +3,6 @@ import { Link } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { formatDateShort, formatINR } from "../lib/format";
 import { Badge, Button, Card, Skeleton } from "../components/ui";
-import { useSession } from "../hooks/useSession";
 import { toast } from "../components/ToastHost";
 
 type CycleRow = {
@@ -70,7 +69,6 @@ function DashboardSkeleton() {
 }
 
 export default function Dashboard() {
-  const { session } = useSession();
 
   const [rows, setRows] = useState<CycleRow[]>([]);
   const [reminders, setReminders] = useState<ReminderRow[]>([]);
