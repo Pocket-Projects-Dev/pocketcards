@@ -17,6 +17,7 @@ import EditCard from "./pages/EditCard";
 import Privacy from "./pages/Privacy";
 import Terms from "./pages/Terms";
 import EditSpend from "./pages/EditSpend";
+import Settings from "./pages/Settings";
 
 export default function App() {
   const { session, loading } = useSession();
@@ -34,15 +35,16 @@ export default function App() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/cards" element={<Cards />} />
         <Route path="/cards/new" element={<NewCard />} />
+        <Route path="/cards/:cardId/edit" element={<EditCard />} />
+        <Route path="/cards/:cardId/statement" element={<Statement />} />
+        <Route path="/spends/:spendId/edit" element={<EditSpend />} />
+        <Route path="/settings" element={<Settings />} />
 
         <Route path="/add" element={<AddHub />} />
         <Route path="/add/spend" element={<AddSpend />} />
         <Route path="/add/payment" element={<AddPayment />} />
         <Route path="/add/income" element={<AddIncome />} />
         <Route path="/add/emi" element={<NewEmi />} />
-        <Route path="/cards/:cardId/statement" element={<Statement />} />
-        <Route path="/cards/:cardId/edit" element={<EditCard />} />
-        <Route path="/spends/:spendId/edit" element={<EditSpend />} />
 
         <Route path="/emis" element={<Emis />} />
         <Route path="/plan" element={<Plan />} />

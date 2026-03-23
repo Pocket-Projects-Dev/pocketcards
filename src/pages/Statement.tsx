@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { Badge, Button, Card, Input, ProgressBar, Skeleton, cx } from "../components/ui";
 import { formatDateShort, formatINR } from "../lib/format";
 import { cacheGet, cacheSet } from "../lib/cache";
 import { computeCycleWindow, daysUntilISO, getCurrentCycleMonth, isoDate } from "../lib/statement";
-import { getPendingActions, onQueueChange, type PendingAction } from "../lib/offlineQueue";
+import { getPendingActions, onQueueChange, enqueueAction, type PendingAction } from "../lib/offlineQueue";
+import { createEmi, createPayment, createSpend, deleteSpend, isOfflineError, updateSpend } from "../lib/dbOps";
+import { toast } from "../components/ToastHost";
+import BottomSheet from "../components/BottomSheet";
+import { buildEmiSchedule } from "../lib/emi";
 
 type CardRow = {
   id: string;
@@ -133,6 +137,28 @@ export default function Statement() {
   const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [queueTick, setQueueTick] = useState(0);
+  const [refreshNonce, setRefreshNonce] = useState(0);
+
+  const [filter, setFilter] = useState<"all" | "spend" | "payment" | "emi">("all");
+
+  const [sheet, setSheet] = useState<null | "spend" | "payment" | "emi">(null);
+  const [editingSpend, setEditingSpend] = useState<SpendRow | null>(null);
+
+  const [spendAmount, setSpendAmount] = useState("");
+  const [spendDate, setSpendDate] = useState("");
+  const [spendNote, setSpendNote] = useState("");
+
+  const [paymentAmount, setPaymentAmount] = useState("");
+  const [paymentDate, setPaymentDate] = useState("");
+  const [withdrawFund, setWithdrawFund] = useState(true);
+
+  const [emiPrincipal, setEmiPrincipal] = useState("");
+  const [emiRate, setEmiRate] = useState("14");
+  const [emiMonths, setEmiMonths] = useState("12");
+  const [emiPurchaseDate, setEmiPurchaseDate] = useState("");
+  const [emiFirstDueDate, setEmiFirstDueDate] = useState("");
+
+  const [actionBusy, setActionBusy] = useState(false);
 
   const activeMonth = useMemo(() => {
     if (qsMonth) return qsMonth;
@@ -167,7 +193,7 @@ export default function Statement() {
     (async () => {
       const { data: c, error: ce } = await supabase
         .from("cards")
-        .select("id,name,last4,issuer,close_day,due_day,credit_limit")
+        .select("id,name,last4,issuer,close_day,due_day,credit_limit,archived_at")
         .eq("id", id)
         .single();
 
@@ -336,7 +362,7 @@ export default function Statement() {
     return () => {
       alive = false;
     };
-  }, [card, computed, stmtKey]);
+  }, [card, computed, stmtKey, refreshNonce]);
 
   const displaySpends = useMemo(() => {
     if (!card || !computed) return spends;
@@ -344,7 +370,7 @@ export default function Statement() {
     let next = [...spends];
 
     const relevant = pendingActions.filter(
-      (a) =>
+      (a: PendingAction) =>
         (a.type === "create_spend" || a.type === "update_spend" || a.type === "delete_spend") &&
         a.payload.cardId === card.id
     );
@@ -392,8 +418,8 @@ export default function Statement() {
     let next = [...payments];
 
     const relevant = pendingActions.filter(
-      (a) => a.type === "create_payment" && a.payload.cardId === card.id
-    ) as Extract<PendingAction, { type: "create_payment" }>[];
+      (a: PendingAction) => a.type === "create_payment" && a.payload.cardId === card.id
+    );
 
     for (const a of relevant) {
       if (a.payload.paidOn >= computed.payStart && a.payload.paidOn <= computed.dueDate) {
@@ -482,12 +508,348 @@ export default function Statement() {
     return items;
   }, [computed, displaySpends, displayPayments, installments]);
 
+  const filteredTimeline = useMemo(() => {
+    if (filter === "all") return timeline;
+    if (filter === "spend") return timeline.filter((t) => t.kind === "spend");
+    if (filter === "payment") return timeline.filter((t) => t.kind === "payment");
+    return timeline.filter((t) => t.kind === "emi_due");
+  }, [timeline, filter]);
+
+  const filterTotal = useMemo(
+    () => filteredTimeline.reduce((s, t) => s + Number(t.amount || 0), 0),
+    [filteredTimeline]
+  );
+
+  const openCreateSpend = () => {
+    setEditingSpend(null);
+    setSpendAmount("");
+    setSpendDate(todayISOOr(computed?.cycleStart || ""));
+    setSpendNote("");
+    setSheet("spend");
+  };
+
+  const openEditSpend = (s: SpendRow) => {
+    setEditingSpend(s);
+    setSpendAmount(String(Number(s.amount || 0)));
+    setSpendDate(s.date);
+    setSpendNote(s.note || "");
+    setSheet("spend");
+  };
+
+  const openPayment = () => {
+    setPaymentAmount(payRemaining > 0 ? String(payRemaining) : "");
+    setPaymentDate(todayISOOr(computed?.payStart || ""));
+    setWithdrawFund(true);
+    setSheet("payment");
+  };
+
+  const openEmi = () => {
+    setEmiPrincipal("");
+    setEmiRate("14");
+    setEmiMonths("12");
+    setEmiPurchaseDate(todayISOOr(computed?.cycleStart || ""));
+    setEmiFirstDueDate(computed?.dueDate || todayISOOr(""));
+    setSheet("emi");
+  };
+
+  const saveSpend = async () => {
+    if (!card) return;
+
+    const amt = Number(spendAmount || 0);
+    if (!(amt > 0)) {
+      toast("Amount must be greater than 0", "error");
+      return;
+    }
+
+    const available = Math.max(0, Number(card.credit_limit || 0) > 0 ? Number(card.credit_limit || 0) - Number(totals?.remaining || 0) : Infinity);
+    if (Number.isFinite(available) && Number(card.credit_limit || 0) > 0 && amt > available) {
+      toast(`This spend exceeds available limit. Left: ${available}`, "error");
+      return;
+    }
+
+    setActionBusy(true);
+
+    if (editingSpend?.id) {
+      const result = await updateSpend({
+        spendId: editingSpend.id,
+        cardId: card.id,
+        amount: amt,
+        date: spendDate,
+        note: spendNote,
+      });
+
+      if (result.ok) {
+        setActionBusy(false);
+        setSheet(null);
+        setRefreshNonce((x) => x + 1);
+        toast("Spend updated", "success");
+        return;
+      }
+
+      if (isOfflineError(result.error)) {
+        enqueueAction({
+          type: "update_spend",
+          payload: { spendId: editingSpend.id, cardId: card.id, amount: amt, date: spendDate, note: spendNote },
+        });
+        setActionBusy(false);
+        setSheet(null);
+        setQueueTick((x) => x + 1);
+        toast("Offline. Spend update queued.", "success");
+        return;
+      }
+
+      setActionBusy(false);
+      toast(result.error, "error");
+      return;
+    }
+
+    const userId = await getUserId();
+    if (!userId) {
+      setActionBusy(false);
+      toast("Not signed in", "error");
+      return;
+    }
+
+    const result = await createSpend({
+      userId,
+      cardId: card.id,
+      amount: amt,
+      date: spendDate,
+      note: spendNote,
+    });
+
+    if (result.ok) {
+      setActionBusy(false);
+      setSheet(null);
+      setRefreshNonce((x) => x + 1);
+      toast("Spend saved", "success");
+      return;
+    }
+
+    if (isOfflineError(result.error)) {
+      enqueueAction({
+        type: "create_spend",
+        payload: { userId, cardId: card.id, amount: amt, date: spendDate, note: spendNote },
+      });
+      setActionBusy(false);
+      setSheet(null);
+      setQueueTick((x) => x + 1);
+      toast("Offline. Spend queued.", "success");
+      return;
+    }
+
+    setActionBusy(false);
+    toast(result.error, "error");
+  };
+
+  const savePayment = async () => {
+    if (!card || !computed) return;
+
+    const amt = Number(paymentAmount || 0);
+    if (!(amt > 0)) {
+      toast("Amount must be greater than 0", "error");
+      return;
+    }
+
+    if (payRemaining > 0 && amt > payRemaining) {
+      toast(`Payment exceeds remaining due (${payRemaining}).`, "error");
+      return;
+    }
+
+    if (!(paymentDate >= computed.payStart && paymentDate <= computed.dueDate)) {
+      toast(`Pick a date between ${computed.payStart} and ${computed.dueDate}.`, "error");
+      return;
+    }
+
+    const userId = await getUserId();
+    if (!userId) {
+      toast("Not signed in", "error");
+      return;
+    }
+
+    setActionBusy(true);
+
+    const result = await createPayment({
+      userId,
+      cardId: card.id,
+      amount: amt,
+      paidOn: paymentDate,
+      withdrawFund,
+    });
+
+    if (result.ok) {
+      setActionBusy(false);
+      setSheet(null);
+      setRefreshNonce((x) => x + 1);
+      toast("Payment saved", "success");
+      return;
+    }
+
+    if (isOfflineError(result.error)) {
+      enqueueAction({
+        type: "create_payment",
+        payload: { userId, cardId: card.id, amount: amt, paidOn: paymentDate, withdrawFund },
+      });
+      setActionBusy(false);
+      setSheet(null);
+      setQueueTick((x) => x + 1);
+      toast("Offline. Payment queued.", "success");
+      return;
+    }
+
+    setActionBusy(false);
+    toast(result.error, "error");
+  };
+
+  const saveEmi = async () => {
+    if (!card || !computed) return;
+
+    const principal = Number(emiPrincipal || 0);
+    const annualRate = Number(emiRate || 0);
+    const months = Number(emiMonths || 0);
+
+    if (!(principal > 0) || !(months > 0)) {
+      toast("Enter valid EMI values", "error");
+      return;
+    }
+
+    const userId = await getUserId();
+    if (!userId) {
+      toast("Not signed in", "error");
+      return;
+    }
+
+    setActionBusy(true);
+
+    const result = await createEmi({
+      userId,
+      cardId: card.id,
+      principal,
+      annualRate,
+      months,
+      firstDueDate: emiFirstDueDate,
+      purchaseDate: emiPurchaseDate,
+      statementMonth: activeMonth,
+    });
+
+    if (result.ok) {
+      setActionBusy(false);
+      setSheet(null);
+      setRefreshNonce((x) => x + 1);
+      toast("EMI created", "success");
+      return;
+    }
+
+    if (isOfflineError(result.error)) {
+      enqueueAction({
+        type: "create_emi",
+        payload: {
+          userId,
+          cardId: card.id,
+          principal,
+          annualRate,
+          months,
+          firstDueDate: emiFirstDueDate,
+          purchaseDate: emiPurchaseDate,
+          statementMonth: activeMonth,
+        },
+      });
+      setActionBusy(false);
+      setSheet(null);
+      setQueueTick((x) => x + 1);
+      toast("Offline. EMI creation queued.", "success");
+      return;
+    }
+
+    setActionBusy(false);
+    toast(result.error, "error");
+  };
+
+  const removeSpend = async (item: TLItem) => {
+    if (!card || !item.spendId) return;
+
+    const spend = displaySpends.find((s) => s.id === item.spendId);
+    if (!spend) return;
+
+    const result = await deleteSpend({
+      spendId: item.spendId,
+      cardId: card.id,
+    });
+
+    if (result.ok) {
+      setRefreshNonce((x) => x + 1);
+      toast({
+        message: "Spend deleted",
+        type: "success",
+        actionLabel: "Undo",
+        onAction: async () => {
+          const userId = await getUserId();
+          if (!userId) return;
+
+          const undo = await createSpend({
+            userId,
+            cardId: card.id,
+            amount: spend.amount,
+            date: spend.date,
+            note: spend.note || undefined,
+          });
+
+          if (undo.ok) {
+            setRefreshNonce((x) => x + 1);
+            toast("Spend restored", "success");
+            return;
+          }
+
+          if (isOfflineError(undo.error)) {
+            enqueueAction({
+              type: "create_spend",
+              payload: {
+                userId,
+                cardId: card.id,
+                amount: spend.amount,
+                date: spend.date,
+                note: spend.note || undefined,
+              },
+            });
+            setQueueTick((x) => x + 1);
+            toast("Offline. Undo queued.", "success");
+            return;
+          }
+
+          toast(undo.error, "error");
+        },
+      });
+      return;
+    }
+
+    if (isOfflineError(result.error)) {
+      enqueueAction({
+        type: "delete_spend",
+        payload: { spendId: item.spendId, cardId: card.id },
+      });
+      setQueueTick((x) => x + 1);
+      toast("Offline. Delete queued.", "success");
+      return;
+    }
+
+    toast(result.error, "error");
+  };
+
   if ((loading && !card) || !activeMonth) return <StatementSkeleton />;
 
   const onMonthChange = (m: string) => {
     setMonth(m);
     nav({ pathname: location.pathname, search: `?m=${encodeURIComponent(m)}` }, { replace: true });
   };
+
+  const emiPreview = useMemo(() => {
+    const p = Number(emiPrincipal || 0);
+    const r = Number(emiRate || 0);
+    const m = Number(emiMonths || 0);
+    if (!(p > 0) || !(m > 0) || !emiFirstDueDate) return null;
+    const s = buildEmiSchedule({ principal: p, annualRate: r, months: m, firstDueDate: emiFirstDueDate });
+    return { monthly: s.monthlyEmi, total: s.totalPayable };
+  }, [emiPrincipal, emiRate, emiMonths, emiFirstDueDate]);
 
   return (
     <div className="p-4 text-white space-y-3">
@@ -534,21 +896,13 @@ export default function Statement() {
           <ProgressBar value={progress} />
 
           <div className="grid grid-cols-3 gap-2">
-            <Link to={`/add/spend?card=${card?.id ?? ""}&m=${activeMonth}`}>
-              <Button className="w-full" size="sm">Add spend</Button>
-            </Link>
-
+            <Button className="w-full" size="sm" onClick={openCreateSpend}>Add spend</Button>
             {payRemaining > 0 ? (
-              <Link to={`/add/payment?card=${card?.id ?? ""}&m=${activeMonth}&amount=${payRemaining}&max=${payRemaining}&withdraw=1`}>
-                <Button className="w-full" size="sm" variant="primary">Pay remaining</Button>
-              </Link>
+              <Button className="w-full" size="sm" variant="primary" onClick={openPayment}>Pay remaining</Button>
             ) : (
               <Button className="w-full" size="sm" disabled variant="primary">Paid</Button>
             )}
-
-            <Link to={`/add/emi?card=${card?.id ?? ""}&m=${activeMonth}`}>
-              <Button className="w-full" size="sm">Convert EMI</Button>
-            </Link>
+            <Button className="w-full" size="sm" onClick={openEmi}>Convert EMI</Button>
           </div>
 
           {computed ? (
@@ -559,30 +913,36 @@ export default function Statement() {
         </Card>
       ) : null}
 
-      <Card className="p-5">
-        <div className="text-sm text-white/70">Timeline</div>
+      <Card className="p-5 space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-sm text-white/70">Timeline</div>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant={filter === "all" ? "primary" : "secondary"} onClick={() => setFilter("all")}>All</Button>
+            <Button size="sm" variant={filter === "spend" ? "primary" : "secondary"} onClick={() => setFilter("spend")}>Spends</Button>
+            <Button size="sm" variant={filter === "payment" ? "primary" : "secondary"} onClick={() => setFilter("payment")}>Payments</Button>
+            <Button size="sm" variant={filter === "emi" ? "primary" : "secondary"} onClick={() => setFilter("emi")}>EMI</Button>
+          </div>
+        </div>
 
-        {timeline.length === 0 ? (
+        <div className="text-xs text-white/50">
+          {filteredTimeline.length} item{filteredTimeline.length === 1 ? "" : "s"} • {formatINR(filterTotal)}
+        </div>
+
+        {filteredTimeline.length === 0 ? (
           <div className="mt-3 space-y-3">
             <div className="text-sm text-white/70">Start this cycle</div>
             <div className="text-sm text-white/60">
               Add spends as they happen, then record payments anytime until the due date.
             </div>
             <div className="grid grid-cols-3 gap-2">
-              <Link to={`/add/spend?card=${card?.id ?? ""}&m=${activeMonth}`}>
-                <Button className="w-full" size="sm">Add spend</Button>
-              </Link>
-              <Link to={`/add/payment?card=${card?.id ?? ""}&m=${activeMonth}`}>
-                <Button className="w-full" size="sm" variant="primary">Add payment</Button>
-              </Link>
-              <Link to={`/add/emi?card=${card?.id ?? ""}&m=${activeMonth}`}>
-                <Button className="w-full" size="sm">Convert EMI</Button>
-              </Link>
+              <Button className="w-full" size="sm" onClick={openCreateSpend}>Add spend</Button>
+              <Button className="w-full" size="sm" variant="primary" onClick={openPayment}>Add payment</Button>
+              <Button className="w-full" size="sm" onClick={openEmi}>Convert EMI</Button>
             </div>
           </div>
         ) : (
-          <div className="mt-4 space-y-2">
-            {timeline.map((t) => {
+          <div className="space-y-2">
+            {filteredTimeline.map((t) => {
               const chip =
                 t.kind === "payment"
                   ? <Badge tone={t.pending ? "warn" : "good"}>{t.pending ? "Pending" : "Payment"}</Badge>
@@ -611,9 +971,19 @@ export default function Statement() {
                       </div>
 
                       {t.kind === "spend" && t.spendId ? (
-                        <Link to={`/spends/${t.spendId}/edit?card=${card?.id ?? ""}&m=${activeMonth}`}>
-                          <Button size="sm" variant="ghost" className="mt-2">Edit</Button>
-                        </Link>
+                        <div className="mt-2 flex justify-end gap-2">
+                          <Button size="sm" variant="ghost" onClick={() => {
+                            const s = displaySpends.find((x) => x.id === t.spendId);
+                            if (s) openEditSpend(s);
+                          }}>
+                            Edit
+                          </Button>
+                          {!t.pending ? (
+                            <Button size="sm" variant="danger" onClick={() => void removeSpend(t)}>
+                              Delete
+                            </Button>
+                          ) : null}
+                        </div>
                       ) : null}
                     </div>
                   </div>
@@ -623,6 +993,145 @@ export default function Statement() {
           </div>
         )}
       </Card>
+
+      <BottomSheet
+        open={sheet === "spend"}
+        title={editingSpend ? "Edit spend" : "Add spend"}
+        onClose={() => {
+          setSheet(null);
+          setEditingSpend(null);
+        }}
+      >
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <div className="text-xs text-white/60">Amount</div>
+              <Input value={spendAmount} onChange={(e) => setSpendAmount(e.target.value)} inputMode="numeric" className="mt-2" />
+            </div>
+            <div>
+              <div className="text-xs text-white/60">Date</div>
+              <Input value={spendDate} onChange={(e) => setSpendDate(e.target.value)} type="date" className="mt-2" />
+            </div>
+          </div>
+
+          <div>
+            <div className="text-xs text-white/60">Note</div>
+            <Input value={spendNote} onChange={(e) => setSpendNote(e.target.value)} className="mt-2" />
+          </div>
+
+          {!navigator.onLine ? (
+            <div className="text-xs text-amber-200">
+              You’re offline. This change will be queued and synced later.
+            </div>
+          ) : null}
+
+          <Button variant="primary" className="w-full" onClick={() => void saveSpend()} disabled={actionBusy}>
+            {actionBusy ? "Saving…" : editingSpend ? "Save changes" : "Save spend"}
+          </Button>
+        </div>
+      </BottomSheet>
+
+      <BottomSheet
+        open={sheet === "payment"}
+        title="Record payment"
+        onClose={() => setSheet(null)}
+      >
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <div className="text-xs text-white/60">Amount</div>
+              <Input value={paymentAmount} onChange={(e) => setPaymentAmount(e.target.value)} inputMode="numeric" className="mt-2" />
+            </div>
+            <div>
+              <div className="text-xs text-white/60">Date</div>
+              <Input value={paymentDate} onChange={(e) => setPaymentDate(e.target.value)} type="date" className="mt-2" />
+            </div>
+          </div>
+
+          <div className="rounded-3xl bg-black/30 border border-white/10 p-4">
+            <div className="text-sm">Withdraw from Fund?</div>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <Button variant={withdrawFund ? "primary" : "secondary"} onClick={() => setWithdrawFund(true)} type="button">
+                Yes
+              </Button>
+              <Button variant={!withdrawFund ? "primary" : "secondary"} onClick={() => setWithdrawFund(false)} type="button">
+                No
+              </Button>
+            </div>
+          </div>
+
+          {!navigator.onLine ? (
+            <div className="text-xs text-amber-200">
+              You’re offline. This payment will be queued and synced later.
+            </div>
+          ) : null}
+
+          <Button variant="primary" className="w-full" onClick={() => void savePayment()} disabled={actionBusy}>
+            {actionBusy ? "Saving…" : "Save payment"}
+          </Button>
+        </div>
+      </BottomSheet>
+
+      <BottomSheet
+        open={sheet === "emi"}
+        title="Convert to EMI"
+        onClose={() => setSheet(null)}
+      >
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <div className="text-xs text-white/60">Principal</div>
+              <Input value={emiPrincipal} onChange={(e) => setEmiPrincipal(e.target.value)} inputMode="numeric" className="mt-2" />
+            </div>
+            <div>
+              <div className="text-xs text-white/60">Months</div>
+              <Input value={emiMonths} onChange={(e) => setEmiMonths(e.target.value)} inputMode="numeric" className="mt-2" />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <div className="text-xs text-white/60">Annual rate (%)</div>
+              <Input value={emiRate} onChange={(e) => setEmiRate(e.target.value)} inputMode="numeric" className="mt-2" />
+            </div>
+            <div>
+              <div className="text-xs text-white/60">First installment due</div>
+              <Input value={emiFirstDueDate} onChange={(e) => setEmiFirstDueDate(e.target.value)} type="date" className="mt-2" />
+            </div>
+          </div>
+
+          <div>
+            <div className="text-xs text-white/60">Purchase date</div>
+            <Input value={emiPurchaseDate} onChange={(e) => setEmiPurchaseDate(e.target.value)} type="date" className="mt-2" />
+          </div>
+
+          {emiPreview ? (
+            <div className="rounded-3xl bg-black/30 border border-white/10 p-4 text-sm text-white/70">
+              EMI {formatINR(emiPreview.monthly)} / mo • Total {formatINR(emiPreview.total)}
+            </div>
+          ) : null}
+
+          {!navigator.onLine ? (
+            <div className="text-xs text-amber-200">
+              You’re offline. EMI creation will queue and sync later.
+            </div>
+          ) : null}
+
+          <Button variant="primary" className="w-full" onClick={() => void saveEmi()} disabled={actionBusy}>
+            {actionBusy ? "Saving…" : "Create EMI"}
+          </Button>
+        </div>
+      </BottomSheet>
     </div>
   );
+}
+
+function todayISOOr(fallback: string) {
+  const today = new Date().toISOString().slice(0, 10);
+  return today || fallback;
+}
+
+async function getUserId() {
+  const { data } = await supabase.auth.getSession();
+  return data.session?.user?.id ?? null;
 }

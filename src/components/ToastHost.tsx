@@ -1,18 +1,59 @@
 import { useEffect, useState } from "react";
-import { cx } from "./ui";
+import { Button, cx } from "./ui";
 
 type ToastType = "info" | "success" | "error";
-type ToastItem = { id: string; message: string; type: ToastType };
 
-const EVENT = "pp_toast_v1";
+type ToastAction = {
+  label: string;
+  onClick: () => void | Promise<void>;
+};
+
+type ToastItem = {
+  id: string;
+  message: string;
+  type: ToastType;
+  action?: ToastAction;
+};
+
+const EVENT = "pp_toast_v2";
 
 function makeId() {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 }
 
-export function toast(message: string, type: ToastType = "info") {
+type ToastInput =
+  | string
+  | {
+      message: string;
+      type?: ToastType;
+      actionLabel?: string;
+      onAction?: () => void | Promise<void>;
+    };
+
+export function toast(input: ToastInput, type: ToastType = "info") {
   if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent(EVENT, { detail: { message, type } }));
+
+  if (typeof input === "string") {
+    window.dispatchEvent(
+      new CustomEvent(EVENT, {
+        detail: { message: input, type },
+      })
+    );
+    return;
+  }
+
+  window.dispatchEvent(
+    new CustomEvent(EVENT, {
+      detail: {
+        message: input.message,
+        type: input.type || "info",
+        action:
+          input.actionLabel && input.onAction
+            ? { label: input.actionLabel, onClick: input.onAction }
+            : undefined,
+      },
+    })
+  );
 }
 
 export default function ToastHost() {
@@ -20,19 +61,27 @@ export default function ToastHost() {
 
   useEffect(() => {
     const onToast = (e: Event) => {
-      const ce = e as CustomEvent<{ message: string; type?: ToastType }>;
+      const ce = e as CustomEvent<{
+        message: string;
+        type?: ToastType;
+        action?: ToastAction;
+      }>;
+
       const message = String(ce.detail?.message || "").trim();
       if (!message) return;
 
-      const type = (ce.detail?.type || "info") as ToastType;
-      const id = makeId();
-      const next: ToastItem = { id, message, type };
+      const item: ToastItem = {
+        id: makeId(),
+        message,
+        type: (ce.detail?.type || "info") as ToastType,
+        action: ce.detail?.action,
+      };
 
-      setItems((prev) => [next, ...prev].slice(0, 3));
+      setItems((prev) => [item, ...prev].slice(0, 3));
 
       window.setTimeout(() => {
-        setItems((prev) => prev.filter((t) => t.id !== id));
-      }, 3200);
+        setItems((prev) => prev.filter((t) => t.id !== item.id));
+      }, 4000);
     };
 
     window.addEventListener(EVENT, onToast as EventListener);
@@ -48,6 +97,10 @@ export default function ToastHost() {
       ? "border-emerald-400/20 bg-emerald-500/10 text-emerald-50"
       : "border-white/10 bg-white/5 text-white";
 
+  const dismiss = (id: string) => {
+    setItems((prev) => prev.filter((t) => t.id !== id));
+  };
+
   return (
     <div className="fixed top-3 left-0 right-0 z-50 px-3">
       <div className="mx-auto max-w-md space-y-2">
@@ -59,7 +112,22 @@ export default function ToastHost() {
               tone(t.type)
             )}
           >
-            {t.message}
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">{t.message}</div>
+
+              {t.action ? (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={async () => {
+                    await t.action?.onClick?.();
+                    dismiss(t.id);
+                  }}
+                >
+                  {t.action.label}
+                </Button>
+              ) : null}
+            </div>
           </div>
         ))}
       </div>

@@ -39,9 +39,8 @@ export default function AddPayment() {
 
     (async () => {
       const { data, error } = await supabase
-        .from("cards")
-        .select("id,name,last4")
-        .order("created_at", { ascending: false });
+      .from("cards").select("id,name,last4").is("archived_at", null)
+      .order("created_at", { ascending: false });
 
       if (!alive) return;
       if (error) return;

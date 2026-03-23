@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { supabase } from "../lib/supabase";
-import { formatDateShort, formatINR } from "../lib/format";
+import { formatDateShort, formatINR, todayISO } from "../lib/format";
 import { Badge, Button, Card, Skeleton } from "../components/ui";
+import { useSession } from "../hooks/useSession";
 import { toast } from "../components/ToastHost";
+import { enqueueAction } from "../lib/offlineQueue";
+import { isOfflineError, markReminderDone } from "../lib/dbOps";
 
 type CycleRow = {
   card_id: string;
@@ -69,6 +72,8 @@ function DashboardSkeleton() {
 }
 
 export default function Dashboard() {
+  const { session } = useSession();
+  const userId = session?.user?.id ?? null;
 
   const [rows, setRows] = useState<CycleRow[]>([]);
   const [reminders, setReminders] = useState<ReminderRow[]>([]);
@@ -88,7 +93,7 @@ export default function Dashboard() {
   };
 
   const loadReminders = async () => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
     const to = addDaysToISO(today, 14);
 
     const { data, error } = await supabase
@@ -128,6 +133,7 @@ export default function Dashboard() {
         .order("due_date", { ascending: true });
 
       if (!alive) return;
+
       if (dueErr) {
         setErr(`card_cycle_summary: ${dueErr.message}`);
         setLoading(false);
@@ -156,19 +162,70 @@ export default function Dashboard() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!userId || !remindersSupported || rows.length === 0 || !navigator.onLine) return;
+
+    const dueList = rows.filter((r) => Number(r.remaining_due || 0) > 0);
+
+    void (async () => {
+      const today = todayISO();
+
+      for (const row of dueList) {
+        const due3 = addDaysToISO(row.due_date, -3);
+        const due1 = addDaysToISO(row.due_date, -1);
+
+        const remindersToCreate = [
+          { kind: "due_3", remind_on: due3, label: "Due in 3 days" },
+          { kind: "due_1", remind_on: due1, label: "Due tomorrow" },
+        ].filter((r) => r.remind_on >= today);
+
+        for (const r of remindersToCreate) {
+          await supabase
+            .from("in_app_reminders")
+            .upsert(
+              {
+                user_id: userId,
+                card_id: row.card_id,
+                kind: r.kind,
+                title: `${r.label}: ${row.card_name}${row.last4 ? ` •••• ${row.last4}` : ""}`,
+                body: `Remaining ${row.remaining_due}. Due ${row.due_date}.`,
+                remind_on: r.remind_on,
+                is_done: false,
+              },
+              { onConflict: "user_id,card_id,remind_on,kind" }
+            );
+        }
+      }
+
+      await loadReminders();
+    })();
+  }, [rows, userId, remindersSupported]);
+
   const dueList = useMemo(() => rows.filter((r) => Number(r.remaining_due || 0) > 0), [rows]);
   const totalDue = useMemo(() => dueList.reduce((s, r) => s + Number(r.remaining_due || 0), 0), [dueList]);
   const nextDue = useMemo(() => dueList[0] ?? null, [dueList]);
   const urgent = useMemo(() => dueList.find((r) => r.days_to_due <= 3) ?? dueList.find((r) => r.days_to_due <= 7) ?? null, [dueList]);
 
   const markDone = async (id: string) => {
-    const { error } = await supabase.from("in_app_reminders").update({ is_done: true }).eq("id", id);
-    if (error) {
-      toast(error.message, "error");
+    const result = await markReminderDone(id);
+
+    if (result.ok) {
+      setReminders((prev) => prev.filter((r) => r.id !== id));
+      toast("Marked done", "success");
       return;
     }
-    setReminders((prev) => prev.filter((r) => r.id !== id));
-    toast("Marked done", "success");
+
+    if (isOfflineError(result.error)) {
+      enqueueAction({
+        type: "mark_reminder_done",
+        payload: { id },
+      });
+      setReminders((prev) => prev.filter((r) => r.id !== id));
+      toast("Offline. Reminder action queued.", "success");
+      return;
+    }
+
+    toast(result.error, "error");
   };
 
   if (loading) return <DashboardSkeleton />;
@@ -182,6 +239,7 @@ export default function Dashboard() {
         </div>
         <div className="flex items-center gap-2">
           <Link to="/plan"><Button variant="ghost" className="px-3 py-2">Plan</Button></Link>
+          <Link to="/settings"><Button variant="ghost" className="px-3 py-2">Settings</Button></Link>
           <Button variant="ghost" className="px-3 py-2" onClick={signOut}>Sign out</Button>
         </div>
       </div>

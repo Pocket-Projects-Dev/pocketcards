@@ -4,6 +4,8 @@ import { supabase } from "../lib/supabase";
 import { formatDateShort, formatINR } from "../lib/format";
 import { Badge, Button, Card, Input } from "../components/ui";
 import { toast } from "../components/ToastHost";
+import { archiveCard, isOfflineError, restoreCard, updateCard } from "../lib/dbOps";
+import { enqueueAction } from "../lib/offlineQueue";
 
 type CardRow = {
   id: string;
@@ -13,6 +15,7 @@ type CardRow = {
   close_day: number;
   due_day: number;
   credit_limit: number | null;
+  archived_at: string | null;
 };
 
 type SummaryRow = {
@@ -33,6 +36,7 @@ export default function EditCard() {
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [archiving, setArchiving] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
   const [err, setErr] = useState<string | null>(null);
@@ -49,7 +53,8 @@ export default function EditCard() {
 
   const [confirmText, setConfirmText] = useState("");
 
-  const mustConfirm = useMemo(() => (summary?.remaining_due ?? 0) > 0, [summary]);
+  const outstanding = useMemo(() => Number(summary?.remaining_due || 0), [summary]);
+  const isArchived = Boolean(card?.archived_at);
   const canDelete = useMemo(() => confirmText.trim().toUpperCase() === "DELETE", [confirmText]);
 
   useEffect(() => {
@@ -63,7 +68,7 @@ export default function EditCard() {
 
       const { data: c, error: ce } = await supabase
         .from("cards")
-        .select("id,name,issuer,last4,close_day,due_day,credit_limit")
+        .select("id,name,issuer,last4,close_day,due_day,credit_limit,archived_at")
         .eq("id", id)
         .single();
 
@@ -121,27 +126,92 @@ export default function EditCard() {
     setSaving(true);
     setErr(null);
 
-    const payload: any = {
+    const payload = {
+      cardId: id,
       name: name.trim(),
       issuer: issuer.trim() || null,
       last4: last4.trim() || null,
-      close_day: num(closeDay, 25),
-      due_day: num(dueDay, 5),
-      credit_limit: creditLimit.trim() ? num(creditLimit, 0) : null,
+      closeDay: num(closeDay, 25),
+      dueDay: num(dueDay, 5),
+      creditLimit: creditLimit.trim() ? num(creditLimit, 0) : null,
     };
 
-    const { error } = await supabase.from("cards").update(payload).eq("id", id);
+    const result = await updateCard(payload);
 
     setSaving(false);
 
-    if (error) {
-      setErr(error.message);
-      toast(error.message, "error");
+    if (result.ok) {
+      toast("Card updated", "success");
+      nav("/cards");
       return;
     }
 
-    toast("Card updated", "success");
-    nav("/cards");
+    if (isOfflineError(result.error)) {
+      enqueueAction({
+        type: "update_card",
+        payload,
+      });
+      toast("Offline. Card update queued.", "success");
+      nav("/cards");
+      return;
+    }
+
+    setErr(result.error);
+    toast(result.error, "error");
+  };
+
+  const archive = async () => {
+    if (!id) return;
+    setArchiving(true);
+
+    const result = await archiveCard(id);
+
+    setArchiving(false);
+
+    if (result.ok) {
+      toast("Card archived", "success");
+      nav("/cards");
+      return;
+    }
+
+    if (isOfflineError(result.error)) {
+      enqueueAction({
+        type: "archive_card",
+        payload: { cardId: id },
+      });
+      toast("Offline. Archive queued.", "success");
+      nav("/cards");
+      return;
+    }
+
+    toast(result.error, "error");
+  };
+
+  const restore = async () => {
+    if (!id) return;
+    setArchiving(true);
+
+    const result = await restoreCard(id);
+
+    setArchiving(false);
+
+    if (result.ok) {
+      toast("Card restored", "success");
+      nav("/cards");
+      return;
+    }
+
+    if (isOfflineError(result.error)) {
+      enqueueAction({
+        type: "restore_card",
+        payload: { cardId: id },
+      });
+      toast("Offline. Restore queued.", "success");
+      nav("/settings");
+      return;
+    }
+
+    toast(result.error, "error");
   };
 
   const purgeCard = async () => {
@@ -149,6 +219,11 @@ export default function EditCard() {
 
     if (!canDelete) {
       toast("Type DELETE to confirm", "error");
+      return;
+    }
+
+    if (!navigator.onLine) {
+      toast("Permanent delete needs internet", "error");
       return;
     }
 
@@ -182,7 +257,7 @@ export default function EditCard() {
       const { error: cdel } = await supabase.from("cards").delete().eq("id", id);
       if (cdel) throw new Error(cdel.message);
 
-      toast("Card deleted (and all linked data removed)", "success");
+      toast("Card permanently deleted", "success");
       nav("/cards");
     } catch (e: any) {
       const msg = e?.message || "Delete failed";
@@ -200,12 +275,13 @@ export default function EditCard() {
         <div className="min-w-0">
           <div className="text-2xl font-semibold tracking-tight truncate">Edit card</div>
           {card ? (
-            <div className="mt-1 text-sm text-white/60 truncate">
-              {card.name}{card.last4 ? ` •••• ${card.last4}` : ""}
+            <div className="mt-1 flex items-center gap-2 text-sm text-white/60 truncate">
+              <span>{card.name}{card.last4 ? ` •••• ${card.last4}` : ""}</span>
+              {isArchived ? <Badge tone="warn">Archived</Badge> : null}
             </div>
           ) : null}
         </div>
-        {id ? (
+        {id && !isArchived ? (
           <Link to={`/cards/${id}/statement`}>
             <Button variant="ghost" className="px-3 py-2">Open statement</Button>
           </Link>
@@ -214,7 +290,7 @@ export default function EditCard() {
 
       {err ? <Card className="p-4 text-sm text-red-300">{err}</Card> : null}
 
-      {summary ? (
+      {summary && !isArchived ? (
         <Card className="p-5 space-y-2">
           <div className="flex items-center justify-between">
             <div className="text-sm text-white/70">Outstanding</div>
@@ -231,64 +307,85 @@ export default function EditCard() {
         </Card>
       ) : null}
 
-      <Card className="p-5 space-y-4">
-        <div>
-          <div className="text-xs text-white/60">Card name</div>
-          <Input value={name} onChange={(e) => setName(e.target.value)} className="mt-2" />
-        </div>
+      {!isArchived ? (
+        <Card className="p-5 space-y-4">
+          <div>
+            <div className="text-xs text-white/60">Card name</div>
+            <Input value={name} onChange={(e) => setName(e.target.value)} className="mt-2" />
+          </div>
 
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <div className="text-xs text-white/60">Issuer (optional)</div>
-            <Input value={issuer} onChange={(e) => setIssuer(e.target.value)} className="mt-2" />
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <div className="text-xs text-white/60">Issuer (optional)</div>
+              <Input value={issuer} onChange={(e) => setIssuer(e.target.value)} className="mt-2" />
+            </div>
+            <div>
+              <div className="text-xs text-white/60">Last 4 (optional)</div>
+              <Input value={last4} onChange={(e) => setLast4(e.target.value)} className="mt-2" />
+            </div>
           </div>
-          <div>
-            <div className="text-xs text-white/60">Last 4 (optional)</div>
-            <Input value={last4} onChange={(e) => setLast4(e.target.value)} className="mt-2" />
-          </div>
-        </div>
 
-        <div className="grid grid-cols-3 gap-3">
-          <div>
-            <div className="text-xs text-white/60">Limit</div>
-            <Input value={creditLimit} onChange={(e) => setCreditLimit(e.target.value)} inputMode="numeric" className="mt-2" placeholder="400000" />
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <div className="text-xs text-white/60">Limit</div>
+              <Input value={creditLimit} onChange={(e) => setCreditLimit(e.target.value)} inputMode="numeric" className="mt-2" placeholder="400000" />
+            </div>
+            <div>
+              <div className="text-xs text-white/60">Close day</div>
+              <Input value={closeDay} onChange={(e) => setCloseDay(e.target.value)} inputMode="numeric" className="mt-2" />
+            </div>
+            <div>
+              <div className="text-xs text-white/60">Due day</div>
+              <Input value={dueDay} onChange={(e) => setDueDay(e.target.value)} inputMode="numeric" className="mt-2" />
+            </div>
           </div>
-          <div>
-            <div className="text-xs text-white/60">Close day</div>
-            <Input value={closeDay} onChange={(e) => setCloseDay(e.target.value)} inputMode="numeric" className="mt-2" />
-          </div>
-          <div>
-            <div className="text-xs text-white/60">Due day</div>
-            <Input value={dueDay} onChange={(e) => setDueDay(e.target.value)} inputMode="numeric" className="mt-2" />
-          </div>
-        </div>
 
-        <Button variant="primary" onClick={save} disabled={saving || !name.trim()}>
-          {saving ? "Saving…" : "Save changes"}
-        </Button>
-      </Card>
+          <Button variant="primary" onClick={save} disabled={saving || !name.trim()}>
+            {saving ? "Saving…" : "Save changes"}
+          </Button>
+        </Card>
+      ) : null}
+
+      {!isArchived ? (
+        <Card className="p-5 space-y-3">
+          <div className="text-sm text-white/70">Archive card</div>
+          <div className="text-xs text-white/60">
+            Archive hides the card from Home, Cards, and planning, without deleting your historical data.
+          </div>
+          {outstanding > 0 ? (
+            <div className="rounded-3xl bg-black/30 border border-amber-400/20 p-4 text-sm text-amber-100">
+              This card still has outstanding due. Archive is still allowed, but the card will disappear from active planning.
+            </div>
+          ) : null}
+          <Button variant="secondary" onClick={archive} disabled={archiving}>
+            {archiving ? "Archiving…" : "Archive card"}
+          </Button>
+        </Card>
+      ) : (
+        <Card className="p-5 space-y-3">
+          <div className="text-sm text-white/70">Restore card</div>
+          <div className="text-xs text-white/60">
+            Restore makes the card active again and brings it back into statements, cards list, and planning.
+          </div>
+          <Button variant="primary" onClick={restore} disabled={archiving}>
+            {archiving ? "Restoring…" : "Restore card"}
+          </Button>
+        </Card>
+      )}
 
       <Card className="p-5 space-y-3">
-        <div className="text-sm text-white/70">Delete card</div>
+        <div className="text-sm text-white/70">Permanent delete</div>
         <div className="text-xs text-white/60">
-          This removes the card and also deletes all linked spends, payments, EMI plans, and EMI installments for this card.
+          This removes the card and all linked spends, payments, EMI plans, and EMI installments permanently.
         </div>
 
-        {mustConfirm ? (
-          <div className="rounded-3xl bg-black/30 border border-red-400/20 p-4 space-y-3">
-            <div className="text-sm text-red-200">This card has outstanding due. Deleting will wipe history.</div>
-            <div className="text-xs text-white/60">Type DELETE to confirm.</div>
-            <Input value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder="DELETE" />
-          </div>
-        ) : (
-          <div className="rounded-3xl bg-black/30 border border-white/10 p-4 space-y-3">
-            <div className="text-xs text-white/60">Type DELETE to confirm.</div>
-            <Input value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder="DELETE" />
-          </div>
-        )}
+        <div className="rounded-3xl bg-black/30 border border-red-400/20 p-4 space-y-3">
+          <div className="text-xs text-white/60">Type DELETE to confirm.</div>
+          <Input value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder="DELETE" />
+        </div>
 
         <Button variant="danger" onClick={purgeCard} disabled={deleting || !canDelete}>
-          {deleting ? "Deleting…" : "Delete card"}
+          {deleting ? "Deleting…" : "Delete forever"}
         </Button>
       </Card>
     </div>

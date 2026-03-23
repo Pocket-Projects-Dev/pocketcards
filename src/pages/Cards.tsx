@@ -65,6 +65,7 @@ export default function Cards() {
       const { data: c, error: ce } = await supabase
         .from("cards")
         .select("id,name,issuer,last4,credit_limit")
+        .is("archived_at", null)
         .order("created_at", { ascending: false });
 
       if (!alive) return;
@@ -112,9 +113,10 @@ export default function Cards() {
           <div className="text-2xl font-semibold tracking-tight">Cards</div>
           <div className="mt-1 text-sm text-white/60">Limits + statements</div>
         </div>
-        <Link to="/cards/new">
-          <Button variant="primary" size="sm">Add card</Button>
-        </Link>
+        <div className="flex items-center gap-2">
+          <Link to="/settings"><Button variant="ghost" size="sm">Settings</Button></Link>
+          <Link to="/cards/new"><Button variant="primary" size="sm">Add card</Button></Link>
+        </div>
       </div>
 
       {err ? <Card className="p-4 text-sm text-red-300">{err}</Card> : null}
@@ -127,7 +129,7 @@ export default function Cards() {
           </div>
           <div className="grid grid-cols-2 gap-2">
             <Link to="/cards/new"><Button className="w-full" variant="primary">Add card</Button></Link>
-            <Link to="/"><Button className="w-full">Go to dashboard</Button></Link>
+            <Link to="/settings"><Button className="w-full">Settings</Button></Link>
           </div>
         </Card>
       ) : (
